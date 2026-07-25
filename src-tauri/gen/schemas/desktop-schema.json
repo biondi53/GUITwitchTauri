@@ -189,6 +189,12 @@
           "markdownDescription": "Allows disconnecting from IRC chat"
         },
         {
+          "description": "Allows fetching BTTV emotes for a channel",
+          "type": "string",
+          "const": "allow-fetch-bttv-emotes",
+          "markdownDescription": "Allows fetching BTTV emotes for a channel"
+        },
+        {
           "description": "Allows fetching channel badges from Helix",
           "type": "string",
           "const": "allow-fetch-chat-badges",

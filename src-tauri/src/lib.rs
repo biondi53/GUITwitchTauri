@@ -1598,6 +1598,64 @@ async fn fetch_chat_badges(app: tauri::AppHandle, channel_id: String) -> Result<
 }
 
 #[tauri::command]
+async fn fetch_bttv_emotes(channel_id: Option<String>) -> Result<serde_json::Value, String> {
+    let cid = channel_id.unwrap_or_default();
+    log_to_file(&format!("[BTTV] fetch_bttv_emotes(\"{}\") called", cid));
+    let client = reqwest::Client::new();
+    let timeout = std::time::Duration::from_secs(10);
+
+    let mut channel_emotes: Vec<serde_json::Value> = Vec::new();
+    let mut shared_emotes: Vec<serde_json::Value> = Vec::new();
+
+    if !cid.is_empty() && cid != "0" {
+        let channel_url = format!("https://api.betterttv.net/3/cached/users/twitch/{}", cid);
+        match client.get(&channel_url).timeout(timeout).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(ce) = json["channelEmotes"].as_array() {
+                        channel_emotes = ce.clone();
+                    }
+                    if let Some(se) = json["sharedEmotes"].as_array() {
+                        shared_emotes = se.clone();
+                    }
+                    log_to_file(&format!("[BTTV] channel OK → {} channel + {} shared", channel_emotes.len(), shared_emotes.len()));
+                }
+            }
+            Ok(resp) => {
+                log_to_file(&format!("[BTTV] channel FAILED: {}", resp.status()));
+            }
+            Err(e) => {
+                log_to_file(&format!("[BTTV] channel error: {}", e));
+            }
+        }
+    }
+
+    let mut global_emotes: Vec<serde_json::Value> = Vec::new();
+    match client.get("https://api.betterttv.net/3/cached/emotes/global").timeout(timeout).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(arr) = json.as_array() {
+                    global_emotes = arr.clone();
+                }
+                log_to_file(&format!("[BTTV] global OK → {} emotes", global_emotes.len()));
+            }
+        }
+        Ok(resp) => {
+            log_to_file(&format!("[BTTV] global FAILED: {}", resp.status()));
+        }
+        Err(e) => {
+            log_to_file(&format!("[BTTV] global error: {}", e));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "channelEmotes": channel_emotes,
+        "sharedEmotes": shared_emotes,
+        "globalEmotes": global_emotes
+    }))
+}
+
+#[tauri::command]
 fn set_menu_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
@@ -1696,7 +1754,8 @@ pub fn run() {
             lookup_channel_id,
             lookup_stream_info,
             fetch_chat_emotes,
-            fetch_chat_badges
+            fetch_chat_badges,
+            fetch_bttv_emotes
         ])
         .setup(|app| {
             log_to_file("[APP] Tauri setup started");

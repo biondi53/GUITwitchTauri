@@ -94,6 +94,11 @@ description = "Allows fetching channel badges from Helix"
 commands.allow = ["fetch_chat_badges"]
 
 [[permission]]
+identifier = "allow-fetch-bttv-emotes"
+description = "Allows fetching BTTV emotes for a channel"
+commands.allow = ["fetch_bttv_emotes"]
+
+[[permission]]
 identifier = "allow-get-native-incognito-default"
 description = "Allows reading native incognito config"
 commands.allow = ["get_native_incognito_default"]

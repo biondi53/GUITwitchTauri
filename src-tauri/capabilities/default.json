@@ -36,6 +36,7 @@
     "allow-lookup-stream-info",
     "allow-fetch-chat-emotes",
     "allow-fetch-chat-badges",
+    "allow-fetch-bttv-emotes",
     "allow-get-native-incognito-default",
     "allow-get-hide-timestamps-default"
   ]

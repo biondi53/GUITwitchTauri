@@ -829,6 +829,12 @@ body {
   margin: 0 2px;
 }
 
+.chat-msg .bttv-emote {
+  height: 1.8em;
+  vertical-align: middle;
+  margin: 0 1px;
+}
+
 .chat-msg .emote-large {
   height: 7em;
 }

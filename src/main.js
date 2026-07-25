@@ -44,6 +44,8 @@ let lastMessageUser = "";
 let emoteSize = 2;
 let channelEmotes = new Map();
 let channelBadges = new Map();
+let bttvEmotes = new Map();
+let bttvGlobalsLoaded = false;
 let currentChannelId = "";
 let chatUsers = new Set();
 let chatUserRoles = new Map();
@@ -225,9 +227,57 @@ async function fetchChannelEmotesAndBadges(channel) {
       });
     }
 
+    await fetchBttvEmotes(channelId);
+
   } catch (err) {
     console.error("[BADGES-FETCH] Failed:", err);
   }
+}
+
+async function fetchBttvEmotes(channelId) {
+  try {
+    const resp = await invoke("fetch_bttv_emotes", { channelId });
+    if (!resp) return;
+
+    const channelAll = [
+      ...(resp.channelEmotes || []),
+      ...(resp.sharedEmotes || [])
+    ];
+
+    channelAll.forEach((emote) => {
+      if (emote.id && emote.code) {
+        bttvEmotes.set(emote.code, {
+          id: emote.id,
+          animated: emote.animated || false,
+          imageType: emote.imageType || "png"
+        });
+      }
+    });
+
+    if (!bttvGlobalsLoaded && resp.globalEmotes) {
+      resp.globalEmotes.forEach((emote) => {
+        if (emote.id && emote.code) {
+          bttvEmotes.set(emote.code, {
+            id: emote.id,
+            animated: emote.animated || false,
+            imageType: emote.imageType || "png"
+          });
+        }
+      });
+      bttvGlobalsLoaded = true;
+    }
+
+    console.log(`[BTTV] Loaded ${bttvEmotes.size} emotes`);
+  } catch (err) {
+    console.error("[BTTV-FETCH] Failed:", err);
+  }
+}
+
+function getBttvEmoteUrl(name) {
+  const emote = bttvEmotes.get(name);
+  if (!emote) return null;
+  const ext = emote.imageType === "gif" ? "gif" : "png";
+  return `https://cdn.betterttv.net/emote/${emote.id}/2x.${ext}`;
 }
 
 function getBadgeUrl(badgeName, badgeVersion) {
@@ -559,7 +609,47 @@ function renderMessageText(container, text, emotes, bits) {
       container.appendChild(img);
     } else {
       const segmentText = text.slice(seg.start, seg.end);
-      highlightText(container, segmentText, bits);
+      renderTextWithBttv(container, segmentText, bits);
+    }
+  });
+}
+
+function renderTextWithBttv(container, text, bits) {
+  const words = text.split(/(\s+)/);
+  let hasBttv = false;
+  const parts = [];
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    if (/^\s+$/.test(word)) {
+      parts.push({ type: "text", value: word });
+      continue;
+    }
+    const bttvUrl = getBttvEmoteUrl(word);
+    if (bttvUrl) {
+      hasBttv = true;
+      parts.push({ type: "bttv", value: word, url: bttvUrl });
+    } else {
+      parts.push({ type: "text", value: word });
+    }
+  }
+
+  if (!hasBttv) {
+    highlightText(container, text, bits);
+    return;
+  }
+
+  parts.forEach((part) => {
+    if (part.type === "bttv") {
+      const img = document.createElement("img");
+      img.className = "emote bttv-emote";
+      img.src = part.url;
+      img.alt = part.value;
+      img.title = part.value;
+      img.loading = "lazy";
+      container.appendChild(img);
+    } else {
+      highlightText(container, part.value, bits);
     }
   });
 }
@@ -1304,7 +1394,30 @@ async function updateAuthButtons() {
   authBtn.classList.remove("btn-disabled");
 }
 
+async function loadBttvGlobals() {
+  if (bttvGlobalsLoaded) return;
+  try {
+    const resp = await invoke("fetch_bttv_emotes", {});
+    if (!resp || !resp.globalEmotes) return;
+    resp.globalEmotes.forEach((emote) => {
+      if (emote.id && emote.code) {
+        bttvEmotes.set(emote.code, {
+          id: emote.id,
+          animated: emote.animated || false,
+          imageType: emote.imageType || "png"
+        });
+      }
+    });
+    bttvGlobalsLoaded = true;
+    console.log(`[BTTV] Globals loaded: ${resp.globalEmotes.length} emotes`);
+  } catch (err) {
+    console.error("[BTTV] Failed to load globals:", err);
+  }
+}
+
 async function init() {
+  loadBttvGlobals();
+
   const [defaultIncognito, defaultDarkchat, defaultNativeIncognito, defaultHideTimestamps] = await Promise.all([
     invoke("get_incognito_default"),
     invoke("get_darkchat_default"),
