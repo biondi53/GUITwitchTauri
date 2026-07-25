@@ -11,6 +11,85 @@ use tauri::Emitter;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+mod win_dwm {
+    use std::ffi::c_void;
+
+    type HWND = *mut c_void;
+    type BOOL = i32;
+    type DWORD = u32;
+    type HRESULT = i32;
+
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: DWORD = 20;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: DWORD = 33;
+    const DWMWA_BORDER_COLOR: DWORD = 34;
+    const DWMWA_CAPTION_COLOR: DWORD = 35;
+    const DWMWA_SYSTEMBACKDROP_TYPE: DWORD = 38;
+    const DWMWCP_ROUND: DWORD = 2;
+    const DWMSBT_MAINWINDOW: DWORD = 2;
+    const DWMWA_COLOR_NONE: DWORD = 0xFFFFFFFE;
+
+    #[repr(C)]
+    struct MARGINS {
+        cx_left: i32,
+        cx_right: i32,
+        cy_top: i32,
+        cy_bottom: i32,
+    }
+
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: HWND,
+            dw_attribute: DWORD,
+            pv_attribute: *const c_void,
+            cb_attribute: DWORD,
+        ) -> HRESULT;
+        fn DwmExtendFrameIntoClientArea(hwnd: HWND, p_margins: *const MARGINS) -> HRESULT;
+    }
+
+    pub unsafe fn apply_mica(hwnd: isize) {
+        let h = hwnd as HWND;
+        let _ = DwmSetWindowAttribute(
+            h,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &(1i32 as BOOL) as *const BOOL as *const c_void,
+            std::mem::size_of::<BOOL>() as DWORD,
+        );
+        let _ = DwmSetWindowAttribute(
+            h,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &DWMWCP_ROUND as *const DWORD as *const c_void,
+            std::mem::size_of::<DWORD>() as DWORD,
+        );
+        let _ = DwmSetWindowAttribute(
+            h,
+            DWMWA_BORDER_COLOR,
+            &DWMWA_COLOR_NONE as *const DWORD as *const c_void,
+            std::mem::size_of::<DWORD>() as DWORD,
+        );
+        let _ = DwmSetWindowAttribute(
+            h,
+            DWMWA_CAPTION_COLOR,
+            &0x000e0e0e_u32 as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as DWORD,
+        );
+        let margins = MARGINS {
+            cx_left: 1,
+            cx_right: 1,
+            cy_top: 1,
+            cy_bottom: 1,
+        };
+        let _ = DwmExtendFrameIntoClientArea(h, &margins);
+        let backdrop: u32 = DWMSBT_MAINWINDOW;
+        let _ = DwmSetWindowAttribute(
+            h,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as DWORD,
+        );
+    }
+}
+
 static MENU_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 
 struct AppState {
@@ -1723,6 +1802,15 @@ pub fn run() {
                 .resizable(true)
                 .maximized(true)
                 .build()?;
+
+            #[cfg(target_os = "windows")]
+            {
+                let main_window = app.get_webview_window("main").unwrap();
+                if let Ok(hwnd) = main_window.hwnd() {
+                    unsafe { win_dwm::apply_mica(hwnd.0 as isize); }
+                    log_to_file("[APP] Applied Mica backdrop + dark title bar + rounded corners");
+                }
+            }
 
             rebuild_menu(app.handle())?;
             Ok(())
