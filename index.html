@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Twitch Ultralight</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+
+  <div id="connect-screen" class="connect-screen hidden">
+    <div class="connect-box">
+      <img src="/twitch-logo.svg" alt="Twitch" class="twitch-logo" />
+      <input type="text" id="channel-input" placeholder="Nombre del canal de Twitch..." autofocus />
+      <button id="connect-btn">CONECTAR</button>
+      <button id="back-to-grid-btn" class="connect-btn back-btn">Volver a la grilla</button>
+      <p id="error-msg" class="error-msg hidden"></p>
+    </div>
+  </div>
+
+  <div id="grid-screen" class="grid-screen">
+    <div class="grid-header">
+      <h2 id="grid-title">Canales en vivo</h2>
+      <img src="/twitch-logo.svg" alt="Twitch" class="twitch-logo-centered" />
+      <div class="grid-header-actions">
+        <button id="grid-logout-btn" class="grid-manual-btn">Cerrar sesión</button>
+        <button id="grid-manual-btn" class="grid-manual-btn">Ingresar canal manualmente</button>
+      </div>
+    </div>
+    <div id="grid-container" class="grid-container"></div>
+  </div>
+
+  <div id="stream-layout" class="stream-layout hidden">
+    <div class="video-container">
+      <div class="quality-bar">
+        <button id="pip-btn" class="pip-btn">PIP</button>
+        <label for="quality-select">Calidad:</label>
+        <select id="quality-select"></select>
+        <label class="speed-label">Velocidad:</label>
+        <select id="speed-select" class="speed-select">
+          <option value="auto">Auto</option>
+          <option value="1">x1</option>
+          <option value="1.25">x1.25</option>
+          <option value="1.5">x1.5</option>
+          <option value="1.75">x1.75</option>
+          <option value="2">x2</option>
+        </select>
+        <span id="auto-speed-display" class="auto-speed-display"></span>
+        <span id="fast-forward-indicator" class="fast-forward-indicator hidden">▶▶</span>
+        <span id="latency-display" class="latency-display"></span>
+        <input id="livesync-input" type="number" class="livesync-input" min="1" max="8" step="1" value="1" title="Live Sync Duration" hidden>
+        <span id="target-latency-display" class="debug-display" hidden></span>
+        <span id="stall-count-display" class="debug-display" hidden></span>
+        <span id="reset-info-display" class="debug-display" hidden></span>
+      </div>
+      <video id="player" controls autoplay></video>
+    </div>
+    <div class="chat-container">
+      <div class="chat-toolbar">
+        <button id="auth-btn">Iniciar sesión</button>
+        <button id="user-list-btn" class="user-list-btn hidden" title="Lista de usuarios">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="8" cy="5" r="3"/>
+            <path d="M2 15c0-3.3 2.7-6 6-6s6 2.7 6 6"/>
+          </svg>
+          <span id="user-count">0</span>
+        </button>
+      </div>
+      <div id="readonly-chat" class="readonly-chat hidden">
+        <div id="chat-room-state" class="chat-room-state hidden"></div>
+        <div id="readonly-chat-messages" class="readonly-chat-messages"></div>
+        <div id="user-list-panel" class="user-list-panel hidden">
+          <div class="user-list-header">
+            <span>Usuarios conectados</span>
+            <span id="user-list-count">0</span>
+          </div>
+          <div id="user-list-items" class="user-list-items"></div>
+        </div>
+        <button id="new-messages-btn" class="new-messages-btn hidden">Nuevos mensajes</button>
+      </div>
+      <iframe id="chat" allowfullscreen></iframe>
+    </div>
+  </div>
+
+  <script src="/hls.min.js"></script>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

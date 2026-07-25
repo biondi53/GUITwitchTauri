@@ -1,0 +1,104 @@
+[[permission]]
+identifier = "allow-list-streams"
+description = "Allows listing streams"
+commands.allow = ["list_streams"]
+
+[[permission]]
+identifier = "allow-open-login-window"
+description = "Allows opening the login window"
+commands.allow = ["open_login_window"]
+
+[[permission]]
+identifier = "allow-logout-twitch"
+description = "Allows logging out"
+commands.allow = ["logout_twitch"]
+
+[[permission]]
+identifier = "allow-has-twitch-session"
+description = "Allows checking Twitch session"
+commands.allow = ["has_twitch_session"]
+
+[[permission]]
+identifier = "allow-fetch-followed-streams"
+description = "Allows fetching followed streams"
+commands.allow = ["fetch_followed_streams"]
+
+[[permission]]
+identifier = "allow-twitch-oauth-login"
+description = "Allows Twitch OAuth login"
+commands.allow = ["twitch_oauth_login"]
+
+[[permission]]
+identifier = "allow-has-twitch-oauth"
+description = "Allows checking Twitch OAuth token"
+commands.allow = ["has_twitch_oauth"]
+
+[[permission]]
+identifier = "allow-save-oauth-token-cmd"
+description = "Allows saving OAuth token from frontend"
+commands.allow = ["save_oauth_token_cmd"]
+
+[[permission]]
+identifier = "allow-get-incognito-default"
+description = "Allows reading incognito config"
+commands.allow = ["get_incognito_default"]
+
+[[permission]]
+identifier = "allow-get-darkchat-default"
+description = "Allows reading darkchat config"
+commands.allow = ["get_darkchat_default"]
+
+[[permission]]
+identifier = "allow-set-menu-visible"
+description = "Allows setting menu visibility"
+commands.allow = ["set_menu_visible"]
+
+[[permission]]
+identifier = "allow-is-dev-mode"
+description = "Allows checking if app is in dev mode"
+commands.allow = ["is_dev_mode"]
+
+[[permission]]
+identifier = "allow-log-frontend-msg"
+description = "Allows frontend to log messages to Rust log file"
+commands.allow = ["log_frontend_msg"]
+
+[[permission]]
+identifier = "allow-connect-readonly-chat"
+description = "Allows connecting to read-only IRC chat"
+commands.allow = ["connect_readonly_chat"]
+
+[[permission]]
+identifier = "allow-disconnect-readonly-chat"
+description = "Allows disconnecting from IRC chat"
+commands.allow = ["disconnect_readonly_chat"]
+
+[[permission]]
+identifier = "allow-lookup-channel-id"
+description = "Allows looking up a channel's ID via Helix"
+commands.allow = ["lookup_channel_id"]
+
+[[permission]]
+identifier = "allow-lookup-stream-info"
+description = "Allows looking up stream info (title, displayName) via Helix"
+commands.allow = ["lookup_stream_info"]
+
+[[permission]]
+identifier = "allow-fetch-chat-emotes"
+description = "Allows fetching channel emotes from Helix"
+commands.allow = ["fetch_chat_emotes"]
+
+[[permission]]
+identifier = "allow-fetch-chat-badges"
+description = "Allows fetching channel badges from Helix"
+commands.allow = ["fetch_chat_badges"]
+
+[[permission]]
+identifier = "allow-get-native-incognito-default"
+description = "Allows reading native incognito config"
+commands.allow = ["get_native_incognito_default"]
+
+[[permission]]
+identifier = "allow-get-hide-timestamps-default"
+description = "Allows reading hide timestamps config"
+commands.allow = ["get_hide_timestamps_default"]

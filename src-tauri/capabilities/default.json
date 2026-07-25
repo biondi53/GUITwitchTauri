@@ -1,0 +1,42 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main", "player*"],
+  "remote": {
+    "urls": ["http://localhost:*/*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-create",
+    "core:window:allow-set-size",
+    "core:window:allow-set-min-size",
+    "core:window:allow-set-resizable",
+    "core:window:allow-maximize",
+    "core:window:allow-set-title",
+    "core:window:allow-close",
+    "core:webview:allow-create-webview-window",
+    "allow-list-streams",
+    "allow-open-login-window",
+    "allow-logout-twitch",
+    "allow-has-twitch-session",
+    "allow-fetch-followed-streams",
+    "allow-twitch-oauth-login",
+    "allow-has-twitch-oauth",
+    "allow-save-oauth-token-cmd",
+    "allow-get-incognito-default",
+    "allow-get-darkchat-default",
+    "allow-set-menu-visible",
+    "allow-is-dev-mode",
+    "allow-log-frontend-msg",
+    "allow-connect-readonly-chat",
+    "allow-disconnect-readonly-chat",
+    "allow-lookup-channel-id",
+    "allow-lookup-stream-info",
+    "allow-fetch-chat-emotes",
+    "allow-fetch-chat-badges",
+    "allow-get-native-incognito-default",
+    "allow-get-hide-timestamps-default"
+  ]
+}

@@ -1,0 +1,24 @@
+[package]
+name = "twitch-ultra-ligero"
+version = "1.0.0"
+description = "Twitch Ultra-Ligero Desktop Player"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+tauri-plugin-localhost = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+zip = "2"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"

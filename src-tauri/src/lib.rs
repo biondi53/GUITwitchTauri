@@ -1,0 +1,1801 @@
+use serde::Serialize;
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItem, SubmenuBuilder};
+use tauri::webview::WebviewWindowBuilder;
+use tauri::WebviewUrl;
+use tauri::Emitter;
+use tauri::Manager;
+use tokio::sync::Mutex;
+
+static MENU_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
+
+struct AppState {
+    login_active: AtomicBool,
+}
+
+type WsSender = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+    >,
+    tokio_tungstenite::tungstenite::Message,
+>;
+
+struct ChatConnection {
+    sender: Mutex<Option<WsSender>>,
+    connected: AtomicBool,
+    stop_requested: AtomicBool,
+    connection_id: AtomicU64,
+}
+
+struct ChatState {
+    connections: tokio::sync::RwLock<std::collections::HashMap<String, Arc<ChatConnection>>>,
+}
+
+fn token_path() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".twitch-ultra-ligero-oauth-token")
+}
+
+fn load_oauth_token() -> Option<String> {
+    std::fs::read_to_string(token_path()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+async fn get_helix_token(app: &tauri::AppHandle) -> Result<String, String> {
+    if let Some(token) = load_oauth_token() {
+        log_to_file(&format!("[HELIX-TOKEN] Got file token: {}...", &token[..token.len().min(8)]));
+        return Ok(token);
+    }
+    log_to_file("[HELIX-TOKEN] No file token, trying cookie fallback...");
+
+    let handle = app.clone();
+    let cookies: Vec<_> = tokio::task::spawn_blocking(move || {
+        let webview = handle
+            .get_webview_window("main")
+            .ok_or("Ventana principal no encontrada")?;
+        webview.cookies().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let token = cookies
+        .iter()
+        .find(|c| {
+            c.name() == "auth-token"
+                && c.domain()
+                    .map(|d: &str| d.contains("twitch.tv"))
+                    .unwrap_or(false)
+        })
+        .map(|c| c.value().to_string());
+
+    match &token {
+        Some(t) => log_to_file(&format!("[HELIX-TOKEN] Got cookie token: {}...", &t[..t.len().min(8)])),
+        None => log_to_file("[HELIX-TOKEN] No cookie token found either!"),
+    }
+
+    token.ok_or_else(|| "No hay token disponible (ni archivo ni cookie)".to_string())
+}
+
+fn save_oauth_token(token: &str) {
+    let _ = std::fs::write(token_path(), token);
+}
+
+fn log_to_file(msg: &str) {
+    let path = std::env::temp_dir().join("twitch_ultra_log.txt");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{}] {}", chrono_like_time(), msg);
+    }
+}
+
+fn chrono_like_time() -> String {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs() % 86400;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let ms = d.subsec_millis();
+    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, ms)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StreamInfo {
+    name: String,
+    url: String,
+}
+
+#[tauri::command]
+async fn list_streams(app: tauri::AppHandle, channel: &str) -> Result<Vec<StreamInfo>, String> {
+    let token = {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || get_auth_token(&app))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+
+    let mut args: Vec<String> = vec![
+        format!("twitch.tv/{}", channel),
+        "--json".into(),
+        "--twitch-supported-codecs".into(),
+        "h264,h265,av1".into(),
+        "--twitch-low-latency".into(),
+    ];
+    if let Some(token) = token {
+        args.push(format!("--twitch-api-header=Authorization=OAuth {}", token));
+    }
+
+    let output = tokio::task::spawn_blocking(move || {
+        let exe = streamlink_exe();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args(&args);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| {
+        format!(
+            "Error ejecutando streamlink: {}. Streamlink no se pudo encontrar en {}.",
+            e,
+            streamlink_exe().display()
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "El canal esta offline o no existe.".into()
+        } else {
+            stderr
+        });
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Error al parsear JSON de streamlink: {}", e))?;
+
+    let streams = json["streams"]
+        .as_object()
+        .ok_or("No se encontraron streams en la respuesta.")?;
+
+    let mut result: Vec<StreamInfo> = streams
+        .iter()
+        .filter(|(k, _)| k.as_str() != "worst" && k.as_str() != "best")
+        .filter(|(_, v)| {
+            v.get("url")
+                .and_then(|u| u.as_str())
+                .map(|u| !u.is_empty())
+                .unwrap_or(false)
+        })
+        .map(|(name, info)| StreamInfo {
+            name: name.clone(),
+            url: info["url"].as_str().unwrap_or("").to_string(),
+        })
+        .collect();
+
+    result.sort_by(|a, b| {
+        let ka = quality_sort_key(&a.name);
+        let kb = quality_sort_key(&b.name);
+        kb.cmp(&ka)
+    });
+
+    Ok(result)
+}
+
+fn quality_sort_key(name: &str) -> (u32, u8, bool) {
+    let is_alt = name.ends_with("_alt");
+    let base = name.trim_end_matches("_alt");
+    let is_60 = base.ends_with("60");
+    let num = base.trim_end_matches("p60").trim_end_matches("p");
+    let res = num.parse::<u32>().unwrap_or(0);
+    (u32::MAX - res, if is_60 { 1 } else { 0 }, !is_alt)
+}
+
+fn streamlink_dir() -> PathBuf {
+    let local = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(local).join("twitch-ultralight").join("streamlink")
+}
+
+fn streamlink_exe() -> PathBuf {
+    streamlink_dir().join("bin").join("streamlink.exe")
+}
+
+fn ensure_streamlink() -> Result<(), String> {
+    let dir = streamlink_dir();
+    let exe = streamlink_exe();
+
+    if exe.exists() {
+        return Ok(());
+    }
+
+    let resources_dir = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("No se pudo determinar el directorio de la app")?
+        .join("resources");
+
+    let zip_path = resources_dir.join("streamlink-portable.zip");
+
+    if !zip_path.exists() {
+        return Err("No se encontro el paquete de Streamlink.".into());
+    }
+
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    let temp_dir = dir.join("_temp_extract");
+    if temp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+
+    archive.extract(&temp_dir).map_err(|e| format!("Error extrayendo Streamlink: {}", e))?;
+
+    let mut found_subdir: Option<PathBuf> = None;
+    if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if entry.path().join("bin").join("streamlink.exe").exists() {
+                    found_subdir = Some(entry.path());
+                    break;
+                }
+            }
+        }
+    }
+
+    let subdir = found_subdir.ok_or("No se encontro la estructura de Streamlink en el zip")?;
+
+    for entry in std::fs::read_dir(&subdir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let dest = dir.join(entry.file_name());
+        if entry.path().is_dir() {
+            let _ = std::fs::remove_dir_all(&dest);
+            std::fs::rename(entry.path(), &dest).map_err(|e| e.to_string())?;
+        } else {
+            let _ = std::fs::remove_file(&dest);
+            std::fs::copy(entry.path(), &dest).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+async fn check_streamlink_update() {
+    let dir = streamlink_dir();
+    let version_file = dir.join("version.txt");
+
+    let current_version = match std::fs::read_to_string(&version_file) {
+        Ok(v) => v.trim().to_string(),
+        Err(_) => return,
+    };
+
+    if current_version.is_empty() {
+        return;
+    }
+
+    let resp = match reqwest::Client::new()
+        .get("https://api.github.com/repos/streamlink/windows-builds/releases/latest")
+        .header("User-Agent", "twitch-ultralight")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let tag = match json["tag_name"].as_str() {
+        Some(t) => t,
+        None => return,
+    };
+
+    let latest_version = tag.split('-').next().unwrap_or(tag).to_string();
+
+    if latest_version == current_version {
+        return;
+    }
+
+    let zip_url = json["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets.iter().find(|a| {
+                a["name"]
+                    .as_str()
+                    .map(|n| n.ends_with("-py314-x86_64.zip"))
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|a| a["browser_download_url"].as_str());
+
+    let zip_url = match zip_url {
+        Some(u) => u,
+        None => return,
+    };
+
+    let temp_zip = dir.join("_update.zip");
+
+    let resp = match reqwest::Client::new()
+        .get(zip_url)
+        .header("User-Agent", "twitch-ultralight")
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    if bytes.is_empty() {
+        let _ = std::fs::remove_file(&temp_zip);
+        return;
+    }
+
+    if let Err(_) = std::fs::write(&temp_zip, &bytes) {
+        let _ = std::fs::remove_file(&temp_zip);
+        return;
+    }
+
+    let file = match std::fs::File::open(&temp_zip) {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = std::fs::remove_file(&temp_zip);
+            return;
+        }
+    };
+
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => {
+            let _ = std::fs::remove_file(&temp_zip);
+            return;
+        }
+    };
+
+    let temp_extract = dir.join("_temp_update_extract");
+    let _ = std::fs::remove_dir_all(&temp_extract);
+
+    if archive.extract(&temp_extract).is_err() {
+        let _ = std::fs::remove_dir_all(&temp_extract);
+        let _ = std::fs::remove_file(&temp_zip);
+        return;
+    }
+
+    let mut found_subdir: Option<std::path::PathBuf> = None;
+    if let Ok(entries) = std::fs::read_dir(&temp_extract) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if entry.path().join("bin").join("streamlink.exe").exists() {
+                    found_subdir = Some(entry.path());
+                    break;
+                }
+            }
+        }
+    }
+
+    let subdir = match found_subdir {
+        Some(s) => s,
+        None => {
+            let _ = std::fs::remove_dir_all(&temp_extract);
+            let _ = std::fs::remove_file(&temp_zip);
+            return;
+        }
+    };
+
+    for entry in std::fs::read_dir(&subdir).into_iter().flatten().flatten() {
+        let dest = dir.join(entry.file_name());
+        if entry.path().is_dir() {
+            let _ = std::fs::remove_dir_all(&dest);
+            let _ = std::fs::rename(entry.path(), &dest);
+        } else {
+            let _ = std::fs::remove_file(&dest);
+            let _ = std::fs::copy(entry.path(), &dest);
+        }
+    }
+
+    let _ = std::fs::write(&version_file, &latest_version);
+    let _ = std::fs::remove_dir_all(&temp_extract);
+    let _ = std::fs::remove_file(&temp_zip);
+}
+
+fn get_auth_token(app: &tauri::AppHandle) -> Option<String> {
+    let webview = app.get_webview_window("main")?;
+    let cookies = webview.cookies().ok()?;
+    cookies
+        .iter()
+        .find(|c| {
+            c.name() == "auth-token" && c.domain().map(|d| d.contains("twitch.tv")).unwrap_or(false)
+        })
+        .map(|c| c.value().to_string())
+}
+
+#[tauri::command]
+fn open_login_window(app: tauri::AppHandle, current_url: String) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        state.login_active.store(true, Ordering::SeqCst);
+    }
+
+    let main = app
+        .get_webview_window("main")
+        .ok_or("Ventana principal no encontrada")?;
+
+    let twitch_url = "https://www.twitch.tv/login"
+        .parse()
+        .map_err(|e| format!("URL invalida: {}", e))?;
+
+    main.navigate(twitch_url)
+        .map_err(|e| format!("Error al navegar: {}", e))?;
+
+    let escaped_url = current_url.replace('\\', "\\\\").replace('\'', "\\'");
+
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        let check = format!(
+            "if(location.href.indexOf('twitch.tv')!==-1&&location.href.indexOf('/login')===-1){{location.href='{}';}}",
+            escaped_url
+        );
+
+        for _ in 0..120 {
+            let st = app_clone.state::<AppState>();
+            if !st.login_active.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(w) = app_clone.get_webview_window("main") {
+                let _ = w.eval(&check);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn logout_twitch(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.login_active.store(false, Ordering::SeqCst);
+
+    if let Some(token) = load_oauth_token() {
+        let client = reqwest::Client::new();
+        let resp = client
+            .post("https://id.twitch.tv/oauth2/revoke")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!("client_id={}&token={}", TWITCH_CLIENT_ID, token))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                log_to_file(&format!("[LOGOUT] Token revocado - status: {}", r.status()));
+            }
+            Err(e) => {
+                log_to_file(&format!("[LOGOUT] Error al revocar token: {}", e));
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(token_path());
+    Ok(())
+}
+
+#[tauri::command]
+fn is_dev_mode() -> bool {
+    tauri::is_dev()
+}
+
+#[tauri::command]
+fn log_frontend_msg(msg: String) {
+    log_to_file(&format!("[FRONTEND] {}", msg));
+}
+
+#[tauri::command]
+async fn has_twitch_session(app: tauri::AppHandle) -> Result<bool, String> {
+    let handle = app.clone();
+    let cookies: Vec<_> = tokio::task::spawn_blocking(move || {
+        let webview = handle
+            .get_webview_window("main")
+            .ok_or("Ventana principal no encontrada")?;
+        webview.cookies().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let has_session = cookies.iter().any(|c| {
+        c.name() == "auth-token"
+            && c.domain()
+                .map(|d: &str| d.contains("twitch.tv"))
+                .unwrap_or(false)
+    });
+
+    log_to_file(&format!("[GQL] has_twitch_session: {}", has_session));
+    Ok(has_session)
+}
+
+const TWITCH_CLIENT_ID: &str = "hw3wyjrf3nmg3ljsdxkmyawahb25ir";
+
+#[tauri::command]
+fn save_oauth_token_cmd(token: String) -> Result<(), String> {
+    save_oauth_token(&token);
+    log_to_file("[OAUTH] Token saved via command from frontend");
+    Ok(())
+}
+
+#[tauri::command]
+fn twitch_oauth_login(app: tauri::AppHandle, force_verify: Option<bool>) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or("Ventana principal no encontrada")?;
+
+    let redirect_port = if tauri::is_dev() { 1420 } else { 9527 };
+    let verify_param = if force_verify.unwrap_or(false) { "&force_verify=true" } else { "" };
+    let auth_url = format!(
+        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri=http%3A%2F%2Flocalhost%3A{}&response_type=token&scope=user%3Aread%3Afollows{}",
+        TWITCH_CLIENT_ID, redirect_port, verify_param
+    );
+
+    log_to_file(&format!("[OAUTH] Navigating to OAuth URL (redirect port={}, force_verify={})", redirect_port, force_verify.unwrap_or(false)));
+    main.navigate(auth_url.parse().map_err(|e| format!("URL invalida: {}", e))?)
+        .map_err(|e| format!("Error al navegar: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn has_twitch_oauth() -> Result<bool, String> {
+    Ok(load_oauth_token().is_some())
+}
+
+#[tauri::command]
+async fn fetch_followed_streams(_app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    log_to_file("[HELIX] fetch_followed_streams called");
+
+    let oauth_token = load_oauth_token()
+        .ok_or("No hay token de Twitch. Inicia sesion primero.")?;
+
+    log_to_file("[HELIX] Got saved OAuth token");
+    let client = reqwest::Client::new();
+
+    let users_resp = client
+        .get("https://api.twitch.tv/helix/users")
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", oauth_token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Error fetching user info: {}", e))?;
+
+    let status = users_resp.status();
+    if !status.is_success() {
+        let body = users_resp.text().await.unwrap_or_default();
+        log_to_file(&format!("[HELIX] Users endpoint failed: {} - {}", status, &body[..body.len().min(200)]));
+        return Err(format!("Error getting user info: {}", status));
+    }
+
+    let users_json: serde_json::Value = users_resp.json().await
+        .map_err(|e| format!("Error parsing user info: {}", e))?;
+
+    let user_id = users_json["data"][0]["id"].as_str()
+        .ok_or("No user ID in response")?
+        .to_string();
+
+    log_to_file("[HELIX] Got user_id OK");
+
+    let streams_resp = client
+        .get("https://api.twitch.tv/helix/streams/followed")
+        .query(&[("user_id", user_id.as_str()), ("first", "100")])
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", oauth_token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Error fetching followed streams: {}", e))?;
+
+    let status = streams_resp.status();
+    if !status.is_success() {
+        let body = streams_resp.text().await.unwrap_or_default();
+        log_to_file(&format!("[HELIX] Streams endpoint failed: {} - {}", status, &body[..body.len().min(200)]));
+        return Err(format!("Error getting followed streams: {}", status));
+    }
+
+    let streams_json: serde_json::Value = streams_resp.json().await
+        .map_err(|e| format!("Error parsing followed streams: {}", e))?;
+
+    let streams = streams_json["data"].as_array()
+        .ok_or("No streams data in response")?;
+
+    log_to_file(&format!("[HELIX] Got {} followed streams", streams.len()));
+
+    let user_ids: Vec<&str> = streams.iter()
+        .filter_map(|s| s["user_id"].as_str())
+        .collect();
+
+    let mut profile_images: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    if !user_ids.is_empty() {
+        let query_pairs: Vec<(&str, &str)> = user_ids.iter()
+            .map(|id| ("id", *id))
+            .collect();
+        log_to_file(&format!("[HELIX] Fetching profiles for {} users", user_ids.len()));
+        if let Ok(resp) = client
+            .get("https://api.twitch.tv/helix/users")
+            .query(&query_pairs)
+            .header("Client-ID", TWITCH_CLIENT_ID)
+            .header("Authorization", format!("Bearer {}", oauth_token))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            let status = resp.status();
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(data) = json["data"].as_array() {
+                    log_to_file(&format!("[HELIX] Got {} profiles back", data.len()));
+                    for user in data {
+                        if let (Some(id), Some(img)) = (user["id"].as_str(), user["profile_image_url"].as_str()) {
+                            profile_images.insert(id.to_string(), img.to_string());
+                        }
+                    }
+                } else {
+                    log_to_file(&format!("[HELIX] Profiles response ({}): {}", status, &json.to_string()[..json.to_string().len().min(200)]));
+                }
+            }
+        }
+    }
+
+    let edges: Vec<serde_json::Value> = streams.iter()
+        .filter(|s| s["type"].as_str() == Some("live"))
+        .map(|stream| {
+            let uid = stream["user_id"].as_str().unwrap_or("");
+            serde_json::json!({
+                "node": {
+                    "login": stream["user_login"],
+                    "displayName": stream["user_name"],
+                    "profileImageURL": profile_images.get(uid).cloned().unwrap_or_default(),
+                    "stream": {
+                        "title": stream["title"],
+                        "game": { "name": stream["game_name"] },
+                        "viewersCount": stream["viewer_count"]
+                    }
+                }
+            })
+        })
+        .collect();
+
+    log_to_file(&format!("[HELIX] Returning {} live channels", edges.len()));
+
+    Ok(serde_json::json!({
+        "data": {
+            "currentUser": {
+                "follows": {
+                    "edges": edges
+                }
+            }
+        }
+    }))
+}
+
+fn incognito_config_path() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".twitch-ultra-ligero-incognito")
+}
+
+fn read_incognito_config() -> bool {
+    std::fs::read_to_string(incognito_config_path())
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false)
+}
+
+fn write_incognito_config(checked: bool) {
+    let _ = std::fs::write(incognito_config_path(), checked.to_string());
+}
+
+#[tauri::command]
+fn get_incognito_default() -> Result<bool, String> {
+    Ok(read_incognito_config())
+}
+
+fn darkchat_config_path() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".twitch-ultralight-darkchat")
+}
+
+fn read_darkchat_config() -> bool {
+    std::fs::read_to_string(darkchat_config_path())
+        .map(|s| s.trim() == "true")
+        .unwrap_or(true)
+}
+
+fn write_darkchat_config(checked: bool) {
+    let _ = std::fs::write(darkchat_config_path(), checked.to_string());
+}
+
+#[tauri::command]
+fn get_darkchat_default() -> Result<bool, String> {
+    log_to_file("[APP] get_darkchat_default called");
+    Ok(read_darkchat_config())
+}
+
+fn native_incognito_config_path() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".twitch-ultralight-native-incognito")
+}
+
+fn read_native_incognito_config() -> bool {
+    std::fs::read_to_string(native_incognito_config_path())
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false)
+}
+
+fn write_native_incognito_config(checked: bool) {
+    let _ = std::fs::write(native_incognito_config_path(), checked.to_string());
+}
+
+#[tauri::command]
+fn get_native_incognito_default() -> Result<bool, String> {
+    Ok(read_native_incognito_config())
+}
+
+#[tauri::command]
+fn get_hide_timestamps_default() -> Result<bool, String> {
+    Ok(read_hide_timestamps_config())
+}
+
+fn hide_timestamps_config_path() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".twitch-ultralight-hide-timestamps")
+}
+
+fn read_hide_timestamps_config() -> bool {
+    std::fs::read_to_string(hide_timestamps_config_path())
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false)
+}
+
+fn write_hide_timestamps_config(checked: bool) {
+    let _ = std::fs::write(hide_timestamps_config_path(), checked.to_string());
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChatMessage {
+    username: String,
+    display_name: String,
+    color: String,
+    message: String,
+    emotes: Vec<EmoteInfo>,
+    badges: Vec<BadgeInfo>,
+    timestamp: u64,
+    bits: Option<u64>,
+    subscriber: bool,
+    is_action: bool,
+    system_type: Option<String>,
+    system_msg: Option<String>,
+    system_login: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EmoteInfo {
+    id: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BadgeInfo {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RoomState {
+    slow: Option<u32>,
+    subs_only: bool,
+    followers_only: Option<i32>,
+}
+
+fn parse_irc_tags(tag_str: &str) -> HashMap<String, String> {
+    let mut tags = HashMap::new();
+    for part in tag_str.split(';') {
+        if let Some((key, value)) = part.split_once('=') {
+            tags.insert(key.to_string(), value.to_string());
+        }
+    }
+    tags
+}
+
+fn parse_emotes(emote_str: &str) -> Vec<EmoteInfo> {
+    let mut emotes = Vec::new();
+    if emote_str.is_empty() {
+        return emotes;
+    }
+    for emote_group in emote_str.split('/') {
+        let parts: Vec<&str> = emote_group.split(':').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let id = parts[0].to_string();
+        for range in parts[1].split(',') {
+            let range_parts: Vec<&str> = range.split('-').collect();
+            if range_parts.len() == 2 {
+                if let (Ok(start), Ok(end)) = (
+                    range_parts[0].parse::<usize>(),
+                    range_parts[1].parse::<usize>(),
+                ) {
+                    emotes.push(EmoteInfo { id: id.clone(), start, end });
+                }
+            }
+        }
+    }
+    emotes
+}
+
+fn parse_irc_message(raw: &str) -> Option<ChatMessage> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let (tags_str, rest) = if raw.starts_with('@') {
+        let (tags, rest) = raw[1..].split_once(' ')?;
+        (tags, rest)
+    } else {
+        ("", raw)
+    };
+
+    let tags = parse_irc_tags(tags_str);
+
+    let msg_text = if let Some(pos) = rest.find(" :") {
+        &rest[pos + 2..]
+    } else {
+        return None;
+    };
+
+    let display_name = tags.get("display-name").cloned().unwrap_or_default();
+    let username = if let Some(bang) = rest.find('!') {
+        if let Some(at) = rest[bang..].find('@') {
+            &rest[bang + 1..bang + at]
+        } else {
+            ""
+        }
+    } else {
+        ""
+    };
+
+    if username.is_empty() {
+        return None;
+    }
+
+    let color = tags.get("color").cloned().unwrap_or_else(|| "#FFFFFF".to_string());
+    let badges_str = tags.get("badges").cloned().unwrap_or_default();
+    let badges: Vec<BadgeInfo> = if badges_str.is_empty() {
+        Vec::new()
+    } else {
+        badges_str.split(',').filter(|b| !b.is_empty()).map(|b| {
+            let parts: Vec<&str> = b.split('/').collect();
+            BadgeInfo {
+                name: parts.get(0).unwrap_or(&"").to_string(),
+                version: parts.get(1).unwrap_or(&"1").to_string(),
+            }
+        }).collect()
+    };
+    let emote_str = tags.get("emotes").cloned().unwrap_or_default();
+    let emotes = parse_emotes(&emote_str);
+    let timestamp = tags.get("tmi-sent-ts")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let bits = tags.get("bits").and_then(|s| s.parse::<u64>().ok());
+    let subscriber = tags.get("subscriber").map(|s| s == "1").unwrap_or(false);
+
+    let is_action = msg_text.starts_with("\x01ACTION ");
+    let clean_msg = if is_action {
+        msg_text.strip_prefix("\x01ACTION ").unwrap_or(msg_text).trim_end_matches('\x01')
+    } else {
+        msg_text
+    };
+
+    Some(ChatMessage {
+        username: username.to_string(),
+        display_name: if display_name.is_empty() { username.to_string() } else { display_name },
+        color,
+        message: clean_msg.to_string(),
+        emotes,
+        badges,
+        timestamp,
+        bits,
+        subscriber,
+        is_action,
+        system_type: None,
+        system_msg: None,
+        system_login: None,
+    })
+}
+
+fn parse_usernotice(raw: &str) -> Option<ChatMessage> {
+    let raw = raw.trim();
+    if raw.is_empty() || !raw.contains(" USERNOTICE ") {
+        return None;
+    }
+
+    let (tags_str, rest) = if raw.starts_with('@') {
+        let (tags, rest) = raw[1..].split_once(' ')?;
+        (tags, rest)
+    } else {
+        ("", raw)
+    };
+
+    let tags = parse_irc_tags(tags_str);
+
+    let username = if let Some(bang) = rest.find('!') {
+        if let Some(at) = rest[bang..].find('@') {
+            &rest[bang + 1..bang + at]
+        } else { "" }
+    } else { "" };
+
+    let display_name = tags.get("display-name").cloned()
+        .unwrap_or_else(|| username.to_string());
+
+    let msg_text = if let Some(pos) = rest.find(" :") {
+        rest[pos + 2..].to_string()
+    } else {
+        String::new()
+    };
+
+    let msg_id = tags.get("msg-id").cloned().unwrap_or_default();
+    let system_msg = tags.get("system-msg").cloned().unwrap_or_default();
+    let color = tags.get("color").cloned().unwrap_or_else(|| "#FF0000".to_string());
+    let timestamp = tags.get("tmi-sent-ts")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let badges_str = tags.get("badges").cloned().unwrap_or_default();
+    let badges: Vec<BadgeInfo> = if badges_str.is_empty() {
+        Vec::new()
+    } else {
+        badges_str.split(',').filter(|b| !b.is_empty()).map(|b| {
+            let parts: Vec<&str> = b.split('/').collect();
+            BadgeInfo {
+                name: parts.get(0).unwrap_or(&"").to_string(),
+                version: parts.get(1).unwrap_or(&"1").to_string(),
+            }
+        }).collect()
+    };
+    let subscriber = tags.get("subscriber").map(|s| s == "1").unwrap_or(false);
+
+    let system_type = match msg_id.as_str() {
+        "sub" => Some("sub".to_string()),
+        "resub" => Some("resub".to_string()),
+        "subgift" => Some("subgift".to_string()),
+        "anonsubgift" => Some("anonsubgift".to_string()),
+        "submysterygift" => Some("submysterygift".to_string()),
+        "giftpaidupgrade" => Some("giftpaidupgrade".to_string()),
+        "anongiftpaidupgrade" => Some("anongiftpaidupgrade".to_string()),
+        "primepaidupgrade" => Some("primepaidupgrade".to_string()),
+        "raid" => Some("raid".to_string()),
+        "unraid" => Some("unraid".to_string()),
+        "ritual" => Some("ritual".to_string()),
+        "bitsbadgetier" => Some("bitsbadgetier".to_string()),
+        _ => Some(msg_id.clone()),
+    };
+
+    let system_login = tags.get("msg-param-login").cloned()
+        .or_else(|| tags.get("msg-param-recipient-login").cloned());
+
+    Some(ChatMessage {
+        username: username.to_string(),
+        display_name,
+        color,
+        message: msg_text,
+        emotes: Vec::new(),
+        badges,
+        timestamp,
+        bits: None,
+        subscriber,
+        is_action: false,
+        system_type,
+        system_msg: Some(system_msg),
+        system_login,
+    })
+}
+
+fn parse_roomstate(raw: &str) -> Option<RoomState> {
+    let raw = raw.trim();
+    if !raw.contains(" ROOMSTATE ") {
+        return None;
+    }
+
+    let tags_str = if raw.starts_with('@') {
+        raw[1..].split_once(' ')?.0
+    } else {
+        return None;
+    };
+
+    let tags = parse_irc_tags(tags_str);
+
+    Some(RoomState {
+        slow: tags.get("slow").and_then(|s| s.parse::<u32>().ok()),
+        subs_only: tags.get("subs-only").map(|s| s == "1").unwrap_or(false),
+        followers_only: tags.get("followers-only").and_then(|s| s.parse::<i32>().ok()),
+    })
+}
+
+fn parse_membership_event(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim();
+    let raw_stripped = if raw.starts_with('@') {
+        match raw.find(" :") {
+            Some(i) => &raw[i + 2..],
+            None => raw,
+        }
+    } else {
+        raw
+    };
+
+    if let Some(join_idx) = raw_stripped.find(" JOIN ") {
+        let prefix = &raw_stripped[..join_idx];
+        if let Some(excl) = prefix.rfind('!') {
+            let username = &prefix[1..excl];
+            return Some(("join".to_string(), username.to_string()));
+        }
+    }
+    if let Some(part_idx) = raw_stripped.find(" PART ") {
+        let prefix = &raw_stripped[..part_idx];
+        if let Some(excl) = prefix.rfind('!') {
+            let username = &prefix[1..excl];
+            return Some(("part".to_string(), username.to_string()));
+        }
+    }
+    None
+}
+
+fn parse_names_reply(raw: &str) -> Option<(String, String, Vec<String>)> {
+    let raw = raw.trim();
+
+    // 353 (RPL_NAMREPLY): :tmi.twitch.tv 353 nick = #canal :user1 user2 user3
+    if let Some(idx) = raw.find(" 353 ") {
+        let rest = &raw[idx + 5..];
+        if let Some(colon_pos) = rest.find(" :") {
+            let before_colon = &rest[..colon_pos];
+            if let Some(eq_pos) = before_colon.find('#') {
+                let channel = &before_colon[eq_pos..];
+                let channel = channel.trim_end_matches(|c: char| c.is_whitespace());
+                let users_str = &rest[colon_pos + 2..];
+                let users: Vec<String> = users_str
+                    .split_whitespace()
+                    .map(|u| {
+                        // Limpiar caracteres de formato IRC y dejar solo [a-zA-Z0-9_]
+                        u.to_lowercase()
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .collect::<String>()
+                    })
+                    .filter(|u| !u.is_empty())
+                    .collect();
+                return Some(("names".to_string(), channel.to_string(), users));
+            }
+        }
+    }
+
+    // 366 (RPL_ENDOFNAMES): :tmi.twitch.tv 366 nick #canal :End of /NAMES list
+    if let Some(idx) = raw.find(" 366 ") {
+        let rest = &raw[idx + 5..];
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let channel = parts[1];
+            return Some(("names_end".to_string(), channel.to_string(), vec![]));
+        }
+    }
+
+    None
+}
+
+#[tauri::command]
+async fn connect_readonly_chat(
+    app: tauri::AppHandle,
+    channel: String,
+    window_label: String,
+) -> Result<(), String> {
+    use futures_util::{SinkExt, StreamExt};
+
+    let chat_state = app.state::<Arc<ChatState>>();
+
+    // Desconectar si ya hay conexión para esta ventana
+    {
+        let conns = chat_state.connections.write().await;
+        if let Some(existing) = conns.get(&window_label) {
+            log_to_file(&format!("[CHAT] Already connected for window {}, disconnecting first", window_label));
+            existing.connected.store(false, Ordering::SeqCst);
+            existing.stop_requested.store(true, Ordering::SeqCst);
+            if let Some(mut sender) = existing.sender.lock().await.take() {
+                let _ = sender.send(tokio_tungstenite::tungstenite::Message::Text("QUIT :bye".into())).await;
+                let _ = sender.close().await;
+            }
+        }
+    }
+
+    let connection = {
+        let conn = Arc::new(ChatConnection {
+            sender: Mutex::new(None),
+            connected: AtomicBool::new(false),
+            stop_requested: AtomicBool::new(false),
+            connection_id: AtomicU64::new(0),
+        });
+        let mut conns = chat_state.connections.write().await;
+        conns.insert(window_label.clone(), conn.clone());
+        conn
+    };
+
+    let my_id = connection.connection_id.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let app_clone = app.clone();
+    let channel_for_task = channel.clone();
+    let label_for_task = window_label.clone();
+
+    tokio::spawn(async move {
+        let emit_chat = |event: &str, payload: serde_json::Value| {
+            let wrapped = serde_json::json!({
+                "channel": channel_for_task,
+                "payload": payload
+            });
+            match app_clone.get_webview_window(&label_for_task) {
+                Some(win) => {
+                    log_to_file(&format!("[EMIT] event='{}' label='{}' channel='{}'", event, label_for_task, channel_for_task));
+                    let _ = win.emit(event, wrapped);
+                }
+                None => {
+                    log_to_file(&format!("[EMIT-ERROR] Window '{}' NOT FOUND for event='{}' channel='{}'", event, label_for_task, channel_for_task));
+                }
+            }
+        };
+
+        let mut backoff_secs = 1u64;
+        let mut was_connected = false;
+        loop {
+            let current_id = connection.connection_id.load(Ordering::SeqCst);
+            if current_id != my_id {
+                log_to_file(&format!("[CHAT] Stale task detected (my_id={}, current={}), exiting", my_id, current_id));
+                break;
+            }
+            if connection.stop_requested.load(Ordering::SeqCst) {
+                break;
+            }
+
+            log_to_file(&format!("[CHAT] Connecting to #{} for window {}", channel_for_task, label_for_task));
+            let _ = emit_chat("chat-reconnect", serde_json::json!("connecting"));
+
+            let ws_result = tokio_tungstenite::connect_async("wss://irc-ws.chat.twitch.tv:443").await;
+            let (ws_stream, _) = match ws_result {
+                Ok(v) => v,
+                Err(e) => {
+                    log_to_file(&format!("[CHAT] Connect error: {}, retrying in {}s", e, backoff_secs));
+                    let _ = emit_chat("chat-reconnect", serde_json::json!("reconnecting"));
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(30);
+                    continue;
+                }
+            };
+
+            let (mut write, mut read) = ws_stream.split();
+
+            log_to_file("[CHAT-IRC] → CAP REQ :twitch.tv/membership");
+            if write.send(tokio_tungstenite::tungstenite::Message::Text(
+                "CAP REQ :twitch.tv/membership".into(),
+            )).await.is_err() { continue; }
+
+            log_to_file("[CHAT-IRC] Esperando CAP ACK...");
+            let mut got_ack = false;
+            while let Some(msg) = read.next().await {
+                if let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg {
+                    let text_str = text.to_string();
+                    let preview = if text_str.len() > 200 { &text_str[..200] } else { &text_str };
+                    log_to_file(&format!("[CHAT-IRC] ← {}", preview));
+                    if text_str.contains("CAP * ACK") {
+                        log_to_file("[CHAT-IRC] CAP ACK recibido, membership activo");
+                        got_ack = true;
+                        break;
+                    }
+                    if text_str.starts_with("PING") {
+                        if let Some(sender) = connection.sender.lock().await.as_mut() {
+                            let _ = sender.send(tokio_tungstenite::tungstenite::Message::Text(
+                                "PONG :tmi.twitch.tv".into(),
+                            )).await;
+                        }
+                    }
+                }
+            }
+
+            if !got_ack {
+                log_to_file("[CHAT-IRC] No se recibió CAP ACK, abortando conexión");
+                continue;
+            }
+
+            log_to_file("[CHAT-IRC] → PASS oauth:justinfan12345");
+            if write.send(tokio_tungstenite::tungstenite::Message::Text(
+                "PASS oauth:justinfan12345".into(),
+            )).await.is_err() { continue; }
+            log_to_file("[CHAT-IRC] → NICK justinfan12345");
+            if write.send(tokio_tungstenite::tungstenite::Message::Text(
+                "NICK justinfan12345".into(),
+            )).await.is_err() { continue; }
+            log_to_file(&format!("[CHAT-IRC] → JOIN #{}", channel_for_task));
+            let join_sent_at = std::time::Instant::now();
+            if write.send(tokio_tungstenite::tungstenite::Message::Text(
+                format!("JOIN #{}", channel_for_task).into(),
+            )).await.is_err() { continue; }
+
+            *connection.sender.lock().await = Some(write);
+            connection.connected.store(true, Ordering::SeqCst);
+            backoff_secs = 1;
+            was_connected = true;
+
+            log_to_file(&format!("[CHAT] Connected to #{} for window {}", channel_for_task, label_for_task));
+            emit_chat("chat-reconnect", serde_json::json!("connected"));
+
+            let connected_since = std::time::Instant::now();
+            let mut pending_names: Vec<String> = Vec::new();
+            let mut names_complete = false;
+            let mut tags_requested = false;
+
+            while let Some(msg_result) = read.next().await {
+                let current_id = connection.connection_id.load(Ordering::SeqCst);
+                if current_id != my_id {
+                    log_to_file(&format!("[CHAT] Stale task detected in read loop (my_id={}, current={}), exiting", my_id, current_id));
+                    break;
+                }
+                if !connection.connected.load(Ordering::SeqCst) {
+                    break;
+                }
+                match msg_result {
+                    Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                        let raw_frame = text.to_string();
+                        for text_str in raw_frame.split("\r\n").filter(|l| !l.is_empty()) {
+
+                        let preview = if text_str.len() > 200 { &text_str[..200] } else { text_str };
+                        log_to_file(&format!("[CHAT-IRC] ← {}", preview));
+
+                        if text_str.contains("CAP * ACK") {
+                            log_to_file(&format!("[CHAT-IRC] ← CAP ACK: {}", text_str));
+                        }
+
+                        if text_str.starts_with("PING") {
+                            log_to_file("[CHAT-IRC] ← PING, enviando PONG");
+                            if let Some(sender) = connection.sender.lock().await.as_mut() {
+                                let _ = sender.send(tokio_tungstenite::tungstenite::Message::Text(
+                                    "PONG :tmi.twitch.tv".into(),
+                                )).await;
+                            }
+                            continue;
+                        }
+
+                        if let Some((event_type, username)) = parse_membership_event(text_str) {
+                            if username.to_lowercase() == "justinfan12345" { continue; }
+                            log_to_file(&format!("[CHAT-IRC] ← {} {}", event_type.to_uppercase(), username));
+                            if event_type == "join" {
+                                emit_chat("chat-user-join", serde_json::json!({ "username": username }));
+                            } else {
+                                emit_chat("chat-user-leave", serde_json::json!({ "username": username }));
+                            }
+                            continue;
+                        }
+
+                        if let Some((names_type, _channel, users)) = parse_names_reply(text_str) {
+                            if names_type == "names" {
+                                let elapsed_ms = join_sent_at.elapsed().as_millis();
+                                log_to_file(&format!("[CHAT-USERS] ← 353 recibido ({}ms después de JOIN): {} usuarios", elapsed_ms, users.len()));
+                                let filtered: Vec<String> = users.into_iter()
+                                    .filter(|u| u.to_lowercase() != "justinfan12345")
+                                    .collect();
+                                pending_names.extend(filtered);
+                                if !pending_names.is_empty() {
+                                    log_to_file(&format!("[CHAT-USERS] Emitiendo bulk add: {} usuarios", pending_names.len()));
+                                    let usernames: Vec<String> = pending_names.drain(..).collect();
+                                    emit_chat("chat-user-bulk-add", serde_json::json!({
+                                        "usernames": usernames
+                                    }));
+                                }
+                            } else if names_type == "names_end" {
+                                names_complete = true;
+                                let elapsed_ms = join_sent_at.elapsed().as_millis();
+                                log_to_file(&format!("[CHAT-USERS] ← 366 (NAMES end) recibido ({}ms después de JOIN)", elapsed_ms));
+                            }
+                            continue;
+                        }
+
+                        if let Some(room_state) = parse_roomstate(text_str) {
+                            if let Ok(val) = serde_json::to_value(&room_state) {
+                                emit_chat("chat-room-state", val);
+                            }
+                            continue;
+                        }
+
+                        if let Some(msg) = parse_usernotice(text_str) {
+                            if let Ok(val) = serde_json::to_value(&msg) {
+                                emit_chat("chat-message", val);
+                            }
+                            continue;
+                        }
+
+                        if let Some(msg) = parse_irc_message(text_str) {
+                            let role = if msg.badges.iter().any(|b| b.name == "broadcaster") {
+                                "broadcaster"
+                            } else if msg.badges.iter().any(|b| b.name == "moderator") {
+                                "moderator"
+                            } else if msg.badges.iter().any(|b| b.name == "vip") {
+                                "vip"
+                            } else {
+                                "viewer"
+                            };
+                            emit_chat("chat-user-role", serde_json::json!({
+                                "username": msg.username,
+                                "role": role
+                            }));
+                            if let Ok(val) = serde_json::to_value(&msg) {
+                                emit_chat("chat-message", val);
+                            }
+                        }
+
+                        } // fin for lines
+
+                        if names_complete && !tags_requested {
+                            if let Some(sender) = connection.sender.lock().await.as_mut() {
+                                log_to_file("[CHAT] Solicitando twitch.tv/tags después del NAMES reply");
+                                let _ = sender.send(tokio_tungstenite::tungstenite::Message::Text(
+                                    "CAP REQ :twitch.tv/tags".into(),
+                                )).await;
+                            }
+                            tags_requested = true;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log_to_file(&format!("[CHAT] Read error: {}", e));
+                        break;
+                    }
+                }
+
+                if connected_since.elapsed().as_secs() > 30 {
+                    backoff_secs = 1;
+                }
+            }
+
+            *connection.sender.lock().await = None;
+            connection.connected.store(false, Ordering::SeqCst);
+
+            let current_id = connection.connection_id.load(Ordering::SeqCst);
+            if !was_connected || current_id != my_id || connection.stop_requested.load(Ordering::SeqCst) {
+                break;
+            }
+
+            log_to_file(&format!("[CHAT] Disconnected from #{}, reconnecting in {}s", channel_for_task, backoff_secs));
+            emit_chat("chat-reconnect", serde_json::json!("reconnecting"));
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(30);
+        }
+
+        log_to_file(&format!("[CHAT] IRC listener loop ended for window {}", label_for_task));
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn disconnect_readonly_chat(app: tauri::AppHandle, window_label: String) -> Result<(), String> {
+    use futures_util::SinkExt;
+
+    let chat_state = app.state::<Arc<ChatState>>();
+    let mut conns = chat_state.connections.write().await;
+
+    if let Some(connection) = conns.remove(&window_label) {
+        connection.connected.store(false, Ordering::SeqCst);
+        connection.stop_requested.store(true, Ordering::SeqCst);
+
+        if let Some(mut sender) = connection.sender.lock().await.take() {
+            let _ = sender.send(tokio_tungstenite::tungstenite::Message::Text(
+                "QUIT :bye".into(),
+            )).await;
+            let _ = sender.close().await;
+        }
+
+        log_to_file(&format!("[CHAT] Disconnected window {}", window_label));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn lookup_channel_id(app: tauri::AppHandle, channel: String) -> Result<String, String> {
+    log_to_file(&format!("[HELIX] lookup_channel_id(\"{}\") called", channel));
+    let oauth_token = get_helix_token(&app).await?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.twitch.tv/helix/users")
+        .query(&[("login", channel.as_str())])
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", oauth_token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Error looking up channel: {}", e))?;
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Error parsing response: {}", e))?;
+
+    let id = body["data"][0]["id"].as_str().map(|s| s.to_string());
+    match &id {
+        Some(id) => log_to_file(&format!("[HELIX] lookup_channel_id OK → {}", id)),
+        None => log_to_file(&format!("[HELIX] lookup_channel_id FAILED → channel '{}' not found, body: {}", channel, &body.to_string()[..body.to_string().len().min(200)])),
+    }
+    id.ok_or_else(|| format!("Channel '{}' not found", channel))
+}
+
+#[tauri::command]
+async fn lookup_stream_info(app: tauri::AppHandle, channel: String) -> Result<serde_json::Value, String> {
+    log_to_file(&format!("[HELIX] lookup_stream_info(\"{}\") called", channel));
+    let oauth_token = get_helix_token(&app).await?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.twitch.tv/helix/streams")
+        .query(&[("user_login", channel.as_str())])
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", oauth_token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Error looking up stream: {}", e))?;
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Error parsing response: {}", e))?;
+
+    let stream = body["data"][0].as_object();
+    match stream {
+        Some(s) => {
+            let display_name = s.get("user_name").and_then(|v| v.as_str()).unwrap_or(&channel);
+            let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            log_to_file(&format!("[HELIX] lookup_stream_info OK → displayName='{}' title='{}'", display_name, title));
+            Ok(serde_json::json!({ "displayName": display_name, "title": title }))
+        }
+        None => {
+            log_to_file(&format!("[HELIX] lookup_stream_info: no stream found for '{}'", channel));
+            Ok(serde_json::json!({ "displayName": channel, "title": "" }))
+        }
+    }
+}
+
+#[tauri::command]
+async fn fetch_chat_emotes(app: tauri::AppHandle, channel_id: String) -> Result<serde_json::Value, String> {
+    log_to_file(&format!("[HELIX] fetch_chat_emotes(\"{}\") called", channel_id));
+    let oauth_token = get_helix_token(&app).await?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.twitch.tv/helix/chat/emotes")
+        .query(&[("broadcaster_id", channel_id.as_str())])
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", oauth_token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Error fetching emotes: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        log_to_file(&format!("[HELIX] fetch_chat_emotes FAILED: {} - {}", status, &body[..body.len().min(200)]));
+        return Err(format!("Error: {}", status));
+    }
+
+    let result: Result<serde_json::Value, _> = resp.json().await;
+    match &result {
+        Ok(val) => {
+            let count = val["data"].as_array().map_or(0, |a| a.len());
+            log_to_file(&format!("[HELIX] fetch_chat_emotes OK → {} emote sets", count));
+        }
+        Err(e) => log_to_file(&format!("[HELIX] fetch_chat_emotes parse error: {}", e)),
+    }
+    result.map_err(|e| format!("Error parsing emotes: {}", e))
+}
+
+#[tauri::command]
+async fn fetch_chat_badges(app: tauri::AppHandle, channel_id: String) -> Result<serde_json::Value, String> {
+    log_to_file(&format!("[HELIX] fetch_chat_badges(\"{}\") called", channel_id));
+    let oauth_token = get_helix_token(&app).await?;
+    let client = reqwest::Client::new();
+
+    // 1) Fetch global badges (moderator, turbo, vip, broadcaster, bits, subscriber, etc.)
+    let global_resp = client
+        .get("https://api.twitch.tv/helix/chat/badges/global")
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", oauth_token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Error fetching global badges: {}", e))?;
+
+    let mut merged: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+
+    if global_resp.status().is_success() {
+        if let Ok(global_json) = global_resp.json::<serde_json::Value>().await {
+            if let Some(data) = global_json["data"].as_array() {
+                for set in data {
+                    if let Some(set_id) = set["set_id"].as_str() {
+                        merged.insert(set_id.to_string(), set.clone());
+                    }
+                }
+            }
+            log_to_file(&format!("[HELIX] fetch_chat_badges global OK → {} badge sets", merged.len()));
+        }
+    } else {
+        let gs = global_resp.status();
+        let body = global_resp.text().await.unwrap_or_default();
+        log_to_file(&format!("[HELIX] fetch_chat_badges global FAILED: {} - {}", gs, &body[..body.len().min(200)]));
+    }
+
+    // 2) Fetch channel-specific badges (subscriber tiers etc.) — these override global
+    let channel_resp = client
+        .get("https://api.twitch.tv/helix/chat/badges")
+        .query(&[("broadcaster_id", channel_id.as_str())])
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", oauth_token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Error fetching channel badges: {}", e))?;
+
+    if channel_resp.status().is_success() {
+        if let Ok(channel_json) = channel_resp.json::<serde_json::Value>().await {
+            if let Some(data) = channel_json["data"].as_array() {
+                for set in data {
+                    if let Some(set_id) = set["set_id"].as_str() {
+                        merged.insert(set_id.to_string(), set.clone());
+                    }
+                }
+            }
+        }
+    } else {
+        let cs = channel_resp.status();
+        let body = channel_resp.text().await.unwrap_or_default();
+        log_to_file(&format!("[HELIX] fetch_chat_badges channel FAILED: {} - {}", cs, &body[..body.len().min(200)]));
+    }
+
+    // 3) Build merged response
+    let sets_count = merged.len();
+    let mut total_versions = 0;
+    let data_array: Vec<serde_json::Value> = merged.into_values().collect();
+    for set in &data_array {
+        if let Some(versions) = set["versions"].as_array() {
+            total_versions += versions.len();
+        }
+    }
+
+    log_to_file(&format!("[HELIX] fetch_chat_badges MERGED → {} badge sets, {} total versions", sets_count, total_versions));
+
+    Ok(serde_json::json!({ "data": data_array }))
+}
+
+#[tauri::command]
+fn set_menu_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or("Ventana principal no encontrada")?;
+
+    if visible {
+        main.show_menu().map_err(|e| e.to_string())?;
+    } else {
+        main.hide_menu().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn rebuild_menu(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let ir_inicio =
+        MenuItem::with_id(app_handle, "go-to-home", "Ir al inicio", true, None::<&str>)?;
+    let explorar =
+        MenuItem::with_id(app_handle, "explorar", "Explorar", true, None::<&str>)?;
+    let incognito_check =
+        CheckMenuItemBuilder::with_id("incognito-mode", "Iniciar en modo incognito")
+            .checked(read_incognito_config())
+            .build(app_handle)?;
+    let darkchat_check = CheckMenuItemBuilder::with_id("darkchat-mode", "Modo oscuro")
+        .checked(read_darkchat_config())
+        .build(app_handle)?;
+    let native_incognito_check =
+        CheckMenuItemBuilder::with_id("native-incognito-chat", "Chat incógnito nativo")
+            .checked(read_native_incognito_config())
+            .build(app_handle)?;
+    let hide_timestamps_check =
+        CheckMenuItemBuilder::with_id("hide-timestamps", "Ocultar timestamps")
+            .checked(read_hide_timestamps_config())
+            .build(app_handle)?;
+    let opciones_menu = SubmenuBuilder::new(app_handle, "Opciones")
+        .item(&ir_inicio)
+        .item(&explorar)
+        .item(&incognito_check)
+        .item(&darkchat_check)
+        .item(&native_incognito_check)
+        .item(&hide_timestamps_check)
+        .build()?;
+    let show_pip = CheckMenuItemBuilder::with_id("show-pip", "PIP")
+        .checked(true)
+        .build(app_handle)?;
+    let show_quality = CheckMenuItemBuilder::with_id("show-quality", "Calidad")
+        .checked(true)
+        .build(app_handle)?;
+    let show_speed = CheckMenuItemBuilder::with_id("show-speed", "Velocidad")
+        .checked(true)
+        .build(app_handle)?;
+    let show_latency = CheckMenuItemBuilder::with_id("show-latency", "Delay")
+        .checked(true)
+        .build(app_handle)?;
+    let ver_menu = SubmenuBuilder::new(app_handle, "Ver")
+        .item(&show_pip)
+        .item(&show_quality)
+        .item(&show_speed)
+        .item(&show_latency)
+        .build()?;
+    let menu = MenuBuilder::new(app_handle)
+        .item(&opciones_menu)
+        .item(&ver_menu)
+        .build()?;
+    app_handle.set_menu(menu)?;
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_localhost::Builder::new(9527).build())
+        .manage(AppState {
+            login_active: AtomicBool::new(false),
+        })
+        .manage(Arc::new(ChatState {
+            connections: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        }))
+        .invoke_handler(tauri::generate_handler![
+            list_streams,
+            open_login_window,
+            logout_twitch,
+            has_twitch_session,
+            has_twitch_oauth,
+            save_oauth_token_cmd,
+            fetch_followed_streams,
+            twitch_oauth_login,
+            get_incognito_default,
+            get_darkchat_default,
+            get_native_incognito_default,
+            get_hide_timestamps_default,
+            set_menu_visible,
+            is_dev_mode,
+            log_frontend_msg,
+            connect_readonly_chat,
+            disconnect_readonly_chat,
+            lookup_channel_id,
+            lookup_stream_info,
+            fetch_chat_emotes,
+            fetch_chat_badges
+        ])
+        .setup(|app| {
+            log_to_file("[APP] Tauri setup started");
+            if let Err(e) = ensure_streamlink() {
+                eprintln!("Advertencia Streamlink: {}", e);
+            }
+
+            let vf = streamlink_dir().join("version.txt");
+            if !vf.exists() {
+                let _ = std::fs::write(&vf, "8.4.0");
+            }
+
+            tauri::async_runtime::spawn(async move {
+                check_streamlink_update().await;
+            });
+
+            let url = if tauri::is_dev() {
+                WebviewUrl::App("index.html".into())
+            } else {
+                WebviewUrl::External("http://localhost:9527".parse().unwrap())
+            };
+            WebviewWindowBuilder::new(app, "main".to_string(), url)
+                .title("Twitch Ultralight")
+                .inner_size(1280.0, 720.0)
+                .min_inner_size(800.0, 450.0)
+                .resizable(true)
+                .maximized(true)
+                .build()?;
+
+            rebuild_menu(app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            match event {
+                tauri::WindowEvent::Destroyed => {
+                    let label = window.label();
+                    if label.starts_with("player") {
+                        log_to_file(&format!("[WINDOW] Player '{}' destroyed, pending menu refresh", label));
+                        MENU_REFRESH_PENDING.store(true, Ordering::SeqCst);
+                    }
+                }
+                tauri::WindowEvent::Focused(true) => {
+                    if window.label() == "main" && MENU_REFRESH_PENDING.swap(false, Ordering::SeqCst) {
+                        log_to_file("[WINDOW] Main focused with pending refresh, rebuilding menu");
+                        let _ = rebuild_menu(window.app_handle());
+                    }
+                }
+                _ => {}
+            }
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "go-to-home" => {
+                if let Some(main) = app.get_webview_window("main") {
+                    let url = if tauri::is_dev() {
+                        "http://localhost:1420"
+                    } else {
+                        "http://localhost:9527"
+                    };
+                    let _ = main.navigate(url.parse().unwrap());
+                }
+            }
+            "explorar" => {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.navigate("https://www.twitch.tv/directory".parse().unwrap());
+                }
+            }
+            "incognito-mode" => {
+                let current = read_incognito_config();
+                write_incognito_config(!current);
+            }
+            "darkchat-mode" => {
+                let current = read_darkchat_config();
+                let new = !current;
+                write_darkchat_config(new);
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.emit("darkchat-mode", new);
+                }
+            }
+            "native-incognito-chat" => {
+                let current = read_native_incognito_config();
+                let new = !current;
+                write_native_incognito_config(new);
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.emit("native-incognito-chat", new);
+                }
+            }
+            "hide-timestamps" => {
+                let current = read_hide_timestamps_config();
+                let new = !current;
+                write_hide_timestamps_config(new);
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.emit("hide-timestamps", new);
+                }
+            }
+            "show-pip" | "show-quality" | "show-speed" | "show-latency" => {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.emit(event.id().as_ref(), ());
+                }
+            }
+            _ => {}
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
