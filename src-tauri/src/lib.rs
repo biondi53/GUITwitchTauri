@@ -12,6 +12,7 @@ use tauri::Manager;
 use tokio::sync::Mutex;
 
 
+
 static MENU_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 
 struct AppState {

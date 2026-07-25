@@ -26,7 +26,6 @@ body {
   align-items: center;
   justify-content: center;
   height: 100vh;
-  background: #0e0e10;
 }
 
 .connect-box {
@@ -118,7 +117,6 @@ body {
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
-  background: #0e0e10;
 }
 
 .grid-header {
@@ -352,7 +350,6 @@ body {
   display: grid;
   grid-template-columns: 3fr 1fr;
   height: 100vh;
-  background: #0e0e10;
 }
 
 .video-container {
