@@ -29,14 +29,6 @@ mod win_dwm {
     const DWMSBT_MAINWINDOW: DWORD = 2;
     const DWMWA_COLOR_NONE: DWORD = 0xFFFFFFFE;
 
-    #[repr(C)]
-    struct MARGINS {
-        cx_left: i32,
-        cx_right: i32,
-        cy_top: i32,
-        cy_bottom: i32,
-    }
-
     extern "system" {
         fn DwmSetWindowAttribute(
             hwnd: HWND,
@@ -44,7 +36,6 @@ mod win_dwm {
             pv_attribute: *const c_void,
             cb_attribute: DWORD,
         ) -> HRESULT;
-        fn DwmExtendFrameIntoClientArea(hwnd: HWND, p_margins: *const MARGINS) -> HRESULT;
     }
 
     pub unsafe fn apply_mica(hwnd: isize) {
@@ -73,13 +64,6 @@ mod win_dwm {
             &0x000e0e0e_u32 as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as DWORD,
         );
-        let margins = MARGINS {
-            cx_left: 1,
-            cx_right: 1,
-            cy_top: 1,
-            cy_bottom: 1,
-        };
-        let _ = DwmExtendFrameIntoClientArea(h, &margins);
         let backdrop: u32 = DWMSBT_MAINWINDOW;
         let _ = DwmSetWindowAttribute(
             h,
