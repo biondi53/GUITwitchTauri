@@ -141,7 +141,7 @@ async function connectReadonlyChat(channel, { clearMessages = true, authType = "
     newMessagesBtn.classList.add("hidden");
     chatRoomState.classList.add("hidden");
     readonlyChat.classList.remove("hidden");
-    chatIframe.classList.add("hidden");
+    destroyChatIframe();
 
     const userListBtn = document.getElementById("user-list-btn");
     if (userListBtn) userListBtn.classList.remove("hidden");
@@ -165,10 +165,11 @@ async function disconnectReadonlyChat() {
     await invoke("disconnect_readonly_chat", { windowLabel: getCurrentWebviewWindow().label });
     readonlyChatMessages.innerHTML = "";
     readonlyChat.classList.add("hidden");
-    chatIframe.classList.remove("hidden");
     chatRoomState.classList.add("hidden");
     channelEmotes.clear();
     channelBadges.clear();
+    bttvEmotes.clear();
+    bttvGlobalsLoaded = false;
     clearChatUsers();
     currentChannelId = "";
     lastMessageUser = "";
@@ -942,6 +943,21 @@ function createChatIframe(channel, incognito, darkMode) {
   return iframe;
 }
 
+function destroyChatIframe() {
+  if (chatIframe && chatIframe.isConnected) {
+    chatIframe.src = "about:blank";
+    chatIframe.remove();
+  }
+}
+
+function mountChatIframe(channel, incognito, darkMode) {
+  destroyChatIframe();
+  const newIframe = createChatIframe(channel, incognito, darkMode);
+  document.querySelector(".chat-container").appendChild(newIframe);
+  chatIframe = newIframe;
+  return newIframe;
+}
+
 connectBtn.addEventListener("click", async () => {
   const channel = channelInput.value.trim();
   if (!channel) {
@@ -982,9 +998,7 @@ async function handleLogin() {
       }
       isIncognito = false;
       sessionStorage.removeItem("twitch_incognito");
-      const newIframe = createChatIframe(currentChannel, false, isDarkChat);
-      chatIframe.replaceWith(newIframe);
-      chatIframe = newIframe;
+      mountChatIframe(currentChannel, false, isDarkChat);
     } else {
       isIncognito = false;
       sessionStorage.removeItem("twitch_incognito");
@@ -1052,9 +1066,7 @@ authBtn.addEventListener("click", async () => {
       isIncognito = true;
       sessionStorage.setItem("twitch_incognito", "true");
       if (currentChannel) {
-        const newIframe = createChatIframe(currentChannel, true, isDarkChat);
-        chatIframe.replaceWith(newIframe);
-        chatIframe = newIframe;
+        mountChatIframe(currentChannel, true, isDarkChat);
       }
       await updateAuthButtons();
     }
@@ -1217,9 +1229,7 @@ async function startConnection() {
     if (shouldUseReadonlyChat()) {
       await connectReadonlyChat(channel, { authType: isCustomSession ? "session" : "anonymous" });
     } else {
-      const newIframe = createChatIframe(channel, isIncognito, isDarkChat);
-      chatIframe.replaceWith(newIframe);
-      chatIframe = newIframe;
+      mountChatIframe(channel, isIncognito, isDarkChat);
     }
     videoPlayer.classList.toggle("audio-mode", streamsCache[qualitySelect.selectedIndex].name === "audio_only");
     startPlayback(streamsCache[qualitySelect.selectedIndex].url);
@@ -1669,6 +1679,7 @@ listen("go-to-home", async () => {
   if (currentChannel && shouldUseReadonlyChat()) {
     await disconnectReadonlyChat();
   }
+  destroyChatIframe();
   currentChannel = "";
   streamsCache = [];
   await showGridScreen();
@@ -1678,9 +1689,7 @@ listen("darkchat-mode", async (event) => {
   isDarkChat = event.payload;
   sessionStorage.setItem("twitch_darkchat", isDarkChat);
   if (currentChannel && !shouldUseReadonlyChat()) {
-    const newIframe = createChatIframe(currentChannel, isIncognito, isDarkChat);
-    chatIframe.replaceWith(newIframe);
-    chatIframe = newIframe;
+    mountChatIframe(currentChannel, isIncognito, isDarkChat);
   }
 });
 
@@ -1691,13 +1700,8 @@ listen("chat-nativos", async (event) => {
     if (isChatNativos) {
       isIncognito = !isCustomSession;
       await disconnectReadonlyChat();
-      const newIframe = createChatIframe(currentChannel, isIncognito, isDarkChat);
-      chatIframe.replaceWith(newIframe);
-      chatIframe = newIframe;
+      mountChatIframe(currentChannel, isIncognito, isDarkChat);
     } else {
-      if (!shouldUseReadonlyChat()) {
-        chatIframe.classList.add("hidden");
-      }
       isCustomSession = !isIncognito;
       await connectReadonlyChat(currentChannel, { clearMessages: true, authType: isCustomSession ? "session" : "anonymous" });
     }
