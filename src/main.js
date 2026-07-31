@@ -1363,8 +1363,7 @@ function startPlayback(url) {
             videoPlayer.currentTime = resync.target;
             lastResyncAt = resync.lastResyncAt;
           }
-          const displayDelay =
-            edge != null ? Math.max(0, edge - videoPlayer.currentTime) : hls.latency + 1;
+          const displayDelay = Math.max(0, hls.latency);
           latencyDisplay.textContent = `Delay: ${displayDelay.toFixed(1)}s`;
           latencyDisplay.classList.toggle("latency-high", displayDelay > 7);
           targetLatencyDisplay.textContent = `Target: ${hls.targetLatency?.toFixed(1) ?? "?"}s`;
