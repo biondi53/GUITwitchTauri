@@ -4,6 +4,10 @@ import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewW
 
 const isPlayerWindow = window.location.hash.startsWith("#player/");
 const chatChannel = isPlayerWindow ? window.location.hash.slice("#player/".length) : null;
+let myTwitchUsername = null;
+let pendingLocalEchoes = 0;
+const pendingLocalMessages = [];
+const ECHO_TIMEOUT_MS = 5000;
 
 const connectBtn = document.getElementById("connect-btn");
 const channelInput = document.getElementById("channel-input");
@@ -95,7 +99,8 @@ let currentChannel = "";
 let latencyInterval = null;
 let isIncognito = sessionStorage.getItem("twitch_incognito") === "true";
 let isDarkChat = sessionStorage.getItem("twitch_darkchat") === "true";
-let isNativeIncognito = sessionStorage.getItem("twitch_native_incognito") === "true";
+let isChatNativos = sessionStorage.getItem("twitch_chat_nativos") === "true";
+let isCustomSession = false;
 let isHideTimestamps = sessionStorage.getItem("twitch_hide_timestamps") === "true";
 let currentLiveSyncDuration = 1;
 let stallResetTimeout = null;
@@ -117,17 +122,19 @@ function getChatParent() {
 }
 
 function shouldUseReadonlyChat() {
-  return USE_CUSTOM_CHAT && isIncognito && !isNativeIncognito;
+  return USE_CUSTOM_CHAT && !isChatNativos;
 }
 
-async function connectReadonlyChat(channel) {
+async function connectReadonlyChat(channel, { clearMessages = true, authType = "anonymous" } = {}) {
   if (!shouldUseReadonlyChat()) {
     return;
   }
   try {
     const windowLabel = getCurrentWebviewWindow().label;
-    console.log(`[CHAT] connectReadonlyChat → channel='${channel}' window='${windowLabel}'`);
-    readonlyChatMessages.innerHTML = "";
+    invoke("log_frontend_msg", { msg: `connectReadonlyChat channel='${channel}' authType='${authType}'` });
+    if (clearMessages) {
+      readonlyChatMessages.innerHTML = "";
+    }
     readonlyChatMessages.classList.toggle("hide-timestamps", isHideTimestamps);
     lastMessageUser = "";
     pendingMessages = 0;
@@ -146,7 +153,8 @@ async function connectReadonlyChat(channel) {
       fetchChannelEmotesAndBadges(channel);
     }
 
-    await invoke("connect_readonly_chat", { channel, windowLabel: getCurrentWebviewWindow().label });
+    await invoke("connect_readonly_chat", { channel, windowLabel, authType });
+    updateChatInputVisibility();
   } catch (err) {
     console.error("[CHAT] connect error:", err);
   }
@@ -725,12 +733,33 @@ readonlyChatMessages.addEventListener("scroll", () => {
 });
 
 if (chatChannel) {
+  setInterval(() => {
+    const now = Date.now();
+    for (let i = pendingLocalMessages.length - 1; i >= 0; i--) {
+      if (now - pendingLocalMessages[i].ts > ECHO_TIMEOUT_MS) {
+        pendingLocalMessages.splice(i, 1);
+      }
+    }
+    pendingLocalEchoes = pendingLocalMessages.length;
+  }, 2000);
+
   listen("chat-message", (event) => {
     if (event.payload.channel !== chatChannel) return;
     const data = event.payload.payload;
     const label = getCurrentWebviewWindow().label;
     const username = data?.username || "?";
     const msg = data?.message?.substring(0, 30) || "";
+
+    if (myTwitchUsername && data.username && data.username.toLowerCase() === myTwitchUsername.toLowerCase()) {
+      const incomingText = (data.message || "").trim().toLowerCase();
+      const matchIdx = pendingLocalMessages.findIndex(m => m.text === incomingText);
+      if (matchIdx !== -1) {
+        pendingLocalMessages.splice(matchIdx, 1);
+        pendingLocalEchoes = pendingLocalMessages.length;
+        return;
+      }
+    }
+
     console.log(`[CHAT-EVENT] chat-message → window='${label}' user='${username}' msg='${msg}'`);
     renderChatMessage(data);
   });
@@ -772,6 +801,25 @@ if (chatChannel) {
     if (!chatUserScrolled) {
       readonlyChatMessages.scrollTop = readonlyChatMessages.scrollHeight;
     }
+  });
+
+  listen("chat-auth-failed", async (event) => {
+    if (event.payload.channel !== chatChannel) return;
+    const msg = document.createElement("div");
+    msg.className = "chat-msg system-msg";
+    const typeSpan = document.createElement("span");
+    typeSpan.className = "msg-type";
+    typeSpan.textContent = "Token inválido. Por favor inicie sesión de nuevo.";
+    msg.appendChild(typeSpan);
+    readonlyChatMessages.appendChild(msg);
+    trimMessages();
+
+    isCustomSession = false;
+    myTwitchUsername = null;
+    pendingLocalEchoes = 0;
+    pendingLocalMessages.length = 0;
+    updateChatInputVisibility();
+    await updateAuthButtons();
   });
 
   listen("chat-user-join", (event) => {
@@ -924,17 +972,24 @@ qualitySelect.addEventListener("change", () => {
 });
 
 async function handleLogin() {
-  const hasSession = await invoke("has_twitch_session");
+  const hasSession = await invoke("has_twitch_session", { windowLabel: getCurrentWebviewWindow().label });
 
   if (hasSession && currentChannel) {
-    if (shouldUseReadonlyChat()) {
-      await disconnectReadonlyChat();
+    if (isChatNativos) {
+      if (shouldUseReadonlyChat()) {
+        await disconnectReadonlyChat();
+      }
+      isIncognito = false;
+      sessionStorage.removeItem("twitch_incognito");
+      const newIframe = createChatIframe(currentChannel, false, isDarkChat);
+      chatIframe.replaceWith(newIframe);
+      chatIframe = newIframe;
+    } else {
+      isIncognito = false;
+      sessionStorage.removeItem("twitch_incognito");
+      isCustomSession = true;
+      await connectReadonlyChat(currentChannel, { clearMessages: true, authType: "session" });
     }
-    isIncognito = false;
-    sessionStorage.removeItem("twitch_incognito");
-    const newIframe = createChatIframe(currentChannel, false, isDarkChat);
-    chatIframe.replaceWith(newIframe);
-    chatIframe = newIframe;
     await updateAuthButtons();
     return;
   }
@@ -946,8 +1001,9 @@ async function handleLogin() {
   try {
     authBtn.disabled = true;
     authBtn.textContent = "Redirigiendo...";
+    const myLabel = getCurrentWebviewWindow().label;
     await invoke("open_login_window", {
-      currentUrl: window.location.href,
+      windowLabel: myLabel,
     });
   } catch (err) {
     alert("Error al open login: " + String(err));
@@ -980,21 +1036,134 @@ async function handleLogout() {
 authBtn.addEventListener("click", async () => {
   if (!currentChannel) return;
 
-  if (isIncognito) {
+  const hasSession = await invoke("has_twitch_session", { windowLabel: getCurrentWebviewWindow().label });
+  invoke("log_frontend_msg", { msg: `authBtn click: hasSession=${hasSession} isChatNativos=${isChatNativos} isIncognito=${isIncognito} isCustomSession=${isCustomSession}` });
+
+  if (!hasSession) {
     await handleLogin();
-  } else {
-    isIncognito = true;
-    sessionStorage.setItem("twitch_incognito", "true");
-    if (shouldUseReadonlyChat()) {
-      await connectReadonlyChat(currentChannel);
+    return;
+  }
+
+  if (isChatNativos) {
+    if (isIncognito) {
+      await handleLogin();
     } else {
-      const newIframe = createChatIframe(currentChannel, true, isDarkChat);
-      chatIframe.replaceWith(newIframe);
-      chatIframe = newIframe;
+      isIncognito = true;
+      sessionStorage.setItem("twitch_incognito", "true");
+      if (currentChannel) {
+        const newIframe = createChatIframe(currentChannel, true, isDarkChat);
+        chatIframe.replaceWith(newIframe);
+        chatIframe = newIframe;
+      }
+      await updateAuthButtons();
     }
-    await updateAuthButtons();
+  } else {
+    isCustomSession = !isCustomSession;
+    await reconnectCustomChat();
   }
 });
+
+async function reconnectCustomChat() {
+  if (!currentChannel || !shouldUseReadonlyChat()) {
+    invoke("log_frontend_msg", { msg: `reconnectCustomChat BLOCKED: channel='${currentChannel}' shouldUseReadonly=${shouldUseReadonlyChat()}` });
+    return;
+  }
+
+  if (isCustomSession && !myTwitchUsername) {
+    try { myTwitchUsername = await invoke("get_twitch_username"); } catch (_) {}
+  }
+
+  const windowLabel = getCurrentWebviewWindow().label;
+  const authType = isCustomSession ? "session" : "anonymous";
+  invoke("log_frontend_msg", { msg: `reconnectCustomChat: channel='${currentChannel}' authType='${authType}'` });
+  pendingLocalEchoes = 0;
+  pendingLocalMessages.length = 0;
+  await invoke("disconnect_readonly_chat", { windowLabel });
+
+  await invoke("connect_readonly_chat", {
+    channel: currentChannel,
+    windowLabel,
+    authType,
+  });
+
+  updateChatInputVisibility();
+  await updateAuthButtons();
+}
+
+let chatInputListenersAttached = false;
+
+function setupChatInput() {
+  if (chatInputListenersAttached) return;
+
+  const container = document.getElementById("chat-input-container");
+  if (!container) return;
+
+  async function sendMessage() {
+    const input = document.getElementById("chat-input");
+    const msg = input?.value?.trim();
+    if (!msg || !currentChannel) {
+      invoke("log_frontend_msg", { msg: `send blocked: msg='${msg}' currentChannel='${currentChannel}'` });
+      return;
+    }
+    invoke("log_frontend_msg", { msg: `send: channel='${currentChannel}' msg='${msg}'` });
+    try {
+      await invoke("send_chat_message", {
+        channel: currentChannel,
+        message: msg,
+        windowLabel: getCurrentWebviewWindow().label,
+      });
+      if (myTwitchUsername) {
+        pendingLocalMessages.push({ text: msg.trim().toLowerCase(), ts: Date.now() });
+        pendingLocalEchoes = pendingLocalMessages.length;
+        renderChatMessage({
+          username: myTwitchUsername,
+          display_name: myTwitchUsername,
+          color: "#9147FF",
+          message: msg,
+          emotes: [],
+          badges: [],
+          timestamp: Date.now(),
+          bits: null,
+          subscriber: false,
+          is_action: false,
+        });
+      }
+      input.value = "";
+      invoke("log_frontend_msg", { msg: "send OK" });
+    } catch (err) {
+      invoke("log_frontend_msg", { msg: `send ERROR: ${err}` });
+    }
+  }
+
+  container.addEventListener("click", (e) => {
+    if (e.target.closest("#chat-send-btn")) {
+      sendMessage();
+    }
+  });
+
+  container.addEventListener("keydown", (e) => {
+    if (e.target.id === "chat-input" && e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  chatInputListenersAttached = true;
+  invoke("log_frontend_msg", { msg: "setupChatInput: listeners attached via delegation" });
+}
+
+function updateChatInputVisibility() {
+  const chatInputContainer = document.getElementById("chat-input-container");
+  if (!chatInputContainer) return;
+
+  const isCustom = !isChatNativos;
+  const isVisible = isCustom && isCustomSession;
+  chatInputContainer.classList.toggle("hidden", !isVisible);
+
+  invoke("log_frontend_msg", { msg: `chatInput visible=${isVisible} isChatNativos=${isChatNativos} isCustomSession=${isCustomSession}` });
+
+  setupChatInput();
+}
 
 gridManualBtn.addEventListener("click", async () => {
   stopGridRefresh();
@@ -1045,7 +1214,7 @@ async function startConnection() {
     streamLayout.classList.remove("hidden");
 
     if (shouldUseReadonlyChat()) {
-      await connectReadonlyChat(channel);
+      await connectReadonlyChat(channel, { authType: isCustomSession ? "session" : "anonymous" });
     } else {
       const newIframe = createChatIframe(channel, isIncognito, isDarkChat);
       chatIframe.replaceWith(newIframe);
@@ -1384,12 +1553,9 @@ const isOAuthRedirect = hashChannel.includes("access_token=");
 const savedChannel = isOAuthRedirect ? null : (hashChannel || localStorage.getItem("twitch_channel"));
 
 async function updateAuthButtons() {
-  if (isIncognito) {
-    authBtn.textContent = "Iniciar sesión";
-  } else {
-    const hasSession = await invoke("has_twitch_session");
-    authBtn.textContent = hasSession ? "Cerrar sesión" : "Iniciar sesión";
-  }
+  const isActive = isChatNativos ? !isIncognito : isCustomSession;
+  authBtn.textContent = isActive ? "Cerrar sesión" : "Iniciar sesión";
+
   authBtn.disabled = false;
   authBtn.classList.remove("btn-disabled");
 }
@@ -1418,15 +1584,15 @@ async function loadBttvGlobals() {
 async function init() {
   loadBttvGlobals();
 
-  const [defaultIncognito, defaultDarkchat, defaultNativeIncognito, defaultHideTimestamps] = await Promise.all([
+  const [defaultIncognito, defaultDarkchat, defaultChatNativos, defaultHideTimestamps] = await Promise.all([
     invoke("get_incognito_default"),
     invoke("get_darkchat_default"),
-    invoke("get_native_incognito_default").catch(() => false),
+    invoke("get_chat_nativos_default").catch(() => false),
     invoke("get_hide_timestamps_default").catch(() => false)
   ]);
   isIncognito = defaultIncognito || sessionStorage.getItem("twitch_incognito") === "true";
   isDarkChat = defaultDarkchat || sessionStorage.getItem("twitch_darkchat") === "true";
-  isNativeIncognito = defaultNativeIncognito || sessionStorage.getItem("twitch_native_incognito") === "true";
+  isChatNativos = defaultChatNativos || sessionStorage.getItem("twitch_chat_nativos") === "true";
   isHideTimestamps = defaultHideTimestamps || sessionStorage.getItem("twitch_hide_timestamps") === "true";
 
   if (isPlayerWindow) {
@@ -1436,7 +1602,15 @@ async function init() {
       gridScreen.classList.add("hidden");
       streamLayout.classList.remove("hidden");
       channelInput.value = channel;
+
+  const hasSession = await invoke("has_twitch_session", { windowLabel: getCurrentWebviewWindow().label });
+      if (hasSession) {
+        isCustomSession = !isIncognito && !isChatNativos;
+        try { myTwitchUsername = await invoke("get_twitch_username"); } catch (_) {}
+      }
+
       await startConnection();
+      await updateAuthButtons();
     }
     return;
   }
@@ -1461,8 +1635,7 @@ async function init() {
 
     const hasSession = await invoke("has_twitch_session");
     if (hasSession) {
-      isIncognito = false;
-      sessionStorage.removeItem("twitch_incognito");
+      isCustomSession = !isIncognito && !isChatNativos;
     }
 
     channelInput.value = savedChannel;
@@ -1508,20 +1681,23 @@ listen("darkchat-mode", async (event) => {
   }
 });
 
-listen("native-incognito-chat", async (event) => {
-  isNativeIncognito = event.payload;
-  sessionStorage.setItem("twitch_native_incognito", isNativeIncognito);
-  if (isIncognito && currentChannel) {
-    if (isNativeIncognito) {
-      await disconnectReadonlyChat();
-      const newIframe = createChatIframe(currentChannel, true, isDarkChat);
+listen("chat-nativos", async (event) => {
+  isChatNativos = event.payload;
+  sessionStorage.setItem("twitch_chat_nativos", isChatNativos);
+  if (currentChannel) {
+    if (isChatNativos) {
+      if (shouldUseReadonlyChat()) {
+        await disconnectReadonlyChat();
+      }
+      const newIframe = createChatIframe(currentChannel, isIncognito, isDarkChat);
       chatIframe.replaceWith(newIframe);
       chatIframe = newIframe;
     } else {
-      const newIframe = createChatIframe(currentChannel, true, isDarkChat);
-      chatIframe.replaceWith(newIframe);
-      chatIframe = newIframe;
-      await connectReadonlyChat(currentChannel);
+      if (!shouldUseReadonlyChat()) {
+        chatIframe.classList.add("hidden");
+      }
+      isCustomSession = !isIncognito;
+      await connectReadonlyChat(currentChannel, { clearMessages: true, authType: isCustomSession ? "session" : "anonymous" });
     }
   }
 });
@@ -1530,6 +1706,10 @@ listen("hide-timestamps", async (event) => {
   isHideTimestamps = event.payload;
   sessionStorage.setItem("twitch_hide_timestamps", isHideTimestamps);
   readonlyChatMessages.classList.toggle("hide-timestamps", isHideTimestamps);
+});
+
+listen("cerrar-sesion", async () => {
+  await handleLogout();
 });
 
 document.addEventListener("fullscreenchange", async () => {

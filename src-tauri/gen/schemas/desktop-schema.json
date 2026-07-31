@@ -213,6 +213,12 @@
           "markdownDescription": "Allows fetching followed streams"
         },
         {
+          "description": "Allows reading chat nativos config",
+          "type": "string",
+          "const": "allow-get-chat-nativos-default",
+          "markdownDescription": "Allows reading chat nativos config"
+        },
+        {
           "description": "Allows reading darkchat config",
           "type": "string",
           "const": "allow-get-darkchat-default",
@@ -235,6 +241,12 @@
           "type": "string",
           "const": "allow-get-native-incognito-default",
           "markdownDescription": "Allows reading native incognito config"
+        },
+        {
+          "description": "Allows getting the saved Twitch username",
+          "type": "string",
+          "const": "allow-get-twitch-username",
+          "markdownDescription": "Allows getting the saved Twitch username"
         },
         {
           "description": "Allows checking Twitch OAuth token",
@@ -295,6 +307,24 @@
           "type": "string",
           "const": "allow-save-oauth-token-cmd",
           "markdownDescription": "Allows saving OAuth token from frontend"
+        },
+        {
+          "description": "Allows saving session token and username from webview cookies",
+          "type": "string",
+          "const": "allow-save-session-from-cookies",
+          "markdownDescription": "Allows saving session token and username from webview cookies"
+        },
+        {
+          "description": "Allows fetching username from Helix using saved token",
+          "type": "string",
+          "const": "allow-save-username-from-token",
+          "markdownDescription": "Allows fetching username from Helix using saved token"
+        },
+        {
+          "description": "Allows sending messages to IRC chat",
+          "type": "string",
+          "const": "allow-send-chat-message",
+          "markdownDescription": "Allows sending messages to IRC chat"
         },
         {
           "description": "Allows setting menu visibility",

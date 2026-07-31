@@ -104,6 +104,31 @@ description = "Allows reading native incognito config"
 commands.allow = ["get_native_incognito_default"]
 
 [[permission]]
+identifier = "allow-get-chat-nativos-default"
+description = "Allows reading chat nativos config"
+commands.allow = ["get_chat_nativos_default"]
+
+[[permission]]
+identifier = "allow-send-chat-message"
+description = "Allows sending messages to IRC chat"
+commands.allow = ["send_chat_message"]
+
+[[permission]]
 identifier = "allow-get-hide-timestamps-default"
 description = "Allows reading hide timestamps config"
 commands.allow = ["get_hide_timestamps_default"]
+
+[[permission]]
+identifier = "allow-save-session-from-cookies"
+description = "Allows saving session token and username from webview cookies"
+commands.allow = ["save_session_from_cookies"]
+
+[[permission]]
+identifier = "allow-save-username-from-token"
+description = "Allows fetching username from Helix using saved token"
+commands.allow = ["save_username_from_token"]
+
+[[permission]]
+identifier = "allow-get-twitch-username"
+description = "Allows getting the saved Twitch username"
+commands.allow = ["get_twitch_username"]

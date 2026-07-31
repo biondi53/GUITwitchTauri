@@ -655,6 +655,54 @@ body {
   border-radius: 3px;
 }
 
+.chat-input-container {
+  padding: 8px;
+  background: #1f1f23;
+  border-top: 1px solid #2a2a2e;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 8px 12px;
+  background: #2a2a2e;
+  border: 1px solid #3a3a3d;
+  border-radius: 4px;
+  color: #efeff1;
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.chat-input::placeholder {
+  color: #adadb8;
+}
+
+.chat-input:focus {
+  border-color: #9147ff;
+}
+
+.chat-send-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  background: #9147ff;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.chat-send-btn:hover {
+  background: #772ce8;
+}
+
 .user-list-panel {
   position: absolute;
   top: 0;

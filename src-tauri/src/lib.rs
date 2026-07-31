@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItem, SubmenuBuilder};
+use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::WebviewWindowBuilder;
 use tauri::WebviewUrl;
 use tauri::Emitter;
@@ -42,8 +42,21 @@ fn token_path() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".twitch-ultra-ligero-oauth-token")
 }
 
+fn username_path() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".twitch-ultra-ligero-username")
+}
+
 fn load_oauth_token() -> Option<String> {
     std::fs::read_to_string(token_path()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn load_twitch_username() -> Option<String> {
+    std::fs::read_to_string(username_path()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn save_twitch_username(username: &str) {
+    let _ = std::fs::write(username_path(), username);
 }
 
 async fn get_helix_token(app: &tauri::AppHandle) -> Result<String, String> {
@@ -74,6 +87,19 @@ async fn get_helix_token(app: &tauri::AppHandle) -> Result<String, String> {
         })
         .map(|c| c.value().to_string());
 
+    if let Some(login_cookie) = cookies.iter().find(|c| {
+        c.name() == "login"
+            && c.domain()
+                .map(|d: &str| d.contains("twitch.tv"))
+                .unwrap_or(false)
+    }) {
+        let username = login_cookie.value().to_string();
+        if !username.is_empty() {
+            save_twitch_username(&username);
+            log_to_file(&format!("[HELIX-TOKEN] Username from cookie: {}", username));
+        }
+    }
+
     match &token {
         Some(t) => log_to_file(&format!("[HELIX-TOKEN] Got cookie token: {}...", &t[..t.len().min(8)])),
         None => log_to_file("[HELIX-TOKEN] No cookie token found either!"),
@@ -83,11 +109,20 @@ async fn get_helix_token(app: &tauri::AppHandle) -> Result<String, String> {
 }
 
 fn save_oauth_token(token: &str) {
+    let preview = if token.len() > 5 { &token[..5] } else { token };
+    log_to_file(&format!("[TOKEN] Saving token: len={} preview='{}...'", token.len(), preview));
     let _ = std::fs::write(token_path(), token);
 }
 
 fn log_to_file(msg: &str) {
     let path = std::env::temp_dir().join("twitch_ultra_log.txt");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{}] {}", chrono_like_time(), msg);
+    }
+}
+
+fn debug_chat(msg: &str) {
+    let path = std::env::temp_dir().join("twitch_chat_debug.txt");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "[{}] {}", chrono_like_time(), msg);
     }
@@ -434,24 +469,28 @@ fn get_auth_token(app: &tauri::AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
-fn open_login_window(app: tauri::AppHandle, current_url: String) -> Result<(), String> {
+fn open_login_window(app: tauri::AppHandle, window_label: String) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         state.login_active.store(true, Ordering::SeqCst);
     }
 
-    let main = app
-        .get_webview_window("main")
-        .ok_or("Ventana principal no encontrada")?;
+    let target = app
+        .get_webview_window(&window_label)
+        .ok_or_else(|| format!("Ventana '{}' no encontrada", window_label))?;
+
+    let saved_url = target.url().map(|u| u.to_string()).unwrap_or_else(|_| "http://localhost:1420/".to_string());
+    log_to_file(&format!("[LOGIN] window='{}' saved_url={}", window_label, saved_url));
 
     let twitch_url = "https://www.twitch.tv/login"
         .parse()
         .map_err(|e| format!("URL invalida: {}", e))?;
 
-    main.navigate(twitch_url)
+    target.navigate(twitch_url)
         .map_err(|e| format!("Error al navegar: {}", e))?;
 
-    let escaped_url = current_url.replace('\\', "\\\\").replace('\'', "\\'");
+    let escaped_url = saved_url.replace('\\', "\\\\").replace('\'', "\\'");
+    let label_clone = window_label.clone();
 
     let app_clone = app.clone();
     std::thread::spawn(move || {
@@ -462,12 +501,40 @@ fn open_login_window(app: tauri::AppHandle, current_url: String) -> Result<(), S
             escaped_url
         );
 
+        let mut saved = false;
         for _ in 0..120 {
             let st = app_clone.state::<AppState>();
             if !st.login_active.load(Ordering::SeqCst) {
                 break;
             }
-            if let Some(w) = app_clone.get_webview_window("main") {
+            if let Some(w) = app_clone.get_webview_window(&label_clone) {
+                if !saved {
+                    if let Ok(cookies) = w.cookies() {
+                        let auth_token = cookies.iter().find(|c| {
+                            c.name() == "auth-token"
+                                && c.domain().map(|d: &str| d.contains("twitch.tv")).unwrap_or(false)
+                        }).map(|c| c.value().to_string());
+
+                        if let Some(token) = auth_token {
+                            if !token.is_empty() {
+                                save_oauth_token(&token);
+                                log_to_file(&format!("[LOGIN] Token saved from cookies (window='{}')", label_clone));
+
+                                if let Some(login_cookie) = cookies.iter().find(|c| {
+                                    c.name() == "login"
+                                        && c.domain().map(|d: &str| d.contains("twitch.tv")).unwrap_or(false)
+                                }) {
+                                    let username = login_cookie.value().to_string();
+                                    if !username.is_empty() {
+                                        save_twitch_username(&username);
+                                        log_to_file(&format!("[LOGIN] Username saved: {}", username));
+                                    }
+                                }
+                                saved = true;
+                            }
+                        }
+                    }
+                }
                 let _ = w.eval(&check);
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -475,6 +542,74 @@ fn open_login_window(app: tauri::AppHandle, current_url: String) -> Result<(), S
     });
 
     Ok(())
+}
+
+#[tauri::command]
+fn save_session_from_cookies(app: tauri::AppHandle, window_label: String) -> Result<bool, String> {
+    let webview = app
+        .get_webview_window(&window_label)
+        .ok_or_else(|| format!("Ventana '{}' no encontrada", window_label))?;
+
+    let cookies = webview.cookies().map_err(|e| e.to_string())?;
+
+    let auth_token = cookies
+        .iter()
+        .find(|c| {
+            c.name() == "auth-token"
+                && c.domain()
+                    .map(|d: &str| d.contains("twitch.tv"))
+                    .unwrap_or(false)
+        })
+        .map(|c| c.value().to_string());
+
+    let token = match auth_token {
+        Some(t) if !t.is_empty() => t,
+        _ => return Ok(false),
+    };
+
+    save_oauth_token(&token);
+    log_to_file(&format!("[SESSION] Token saved from cookies (window='{}')", window_label));
+
+    if let Some(login_cookie) = cookies.iter().find(|c| {
+        c.name() == "login"
+            && c.domain()
+                .map(|d: &str| d.contains("twitch.tv"))
+                .unwrap_or(false)
+    }) {
+        let username = login_cookie.value().to_string();
+        if !username.is_empty() {
+            save_twitch_username(&username);
+            log_to_file(&format!("[SESSION] Username saved from cookie: {}", username));
+            return Ok(true);
+        }
+    }
+
+    log_to_file("[SESSION] No login cookie found, trying Helix");
+    Ok(false)
+}
+
+#[tauri::command]
+async fn save_username_from_token(_app: tauri::AppHandle) -> Result<(), String> {
+    let token = load_oauth_token().ok_or("No hay token guardado")?;
+
+    let resp = reqwest::Client::new()
+        .get("https://api.twitch.tv/helix/users")
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Helix error: {}", e))?;
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+
+    if let Some(login) = json["data"][0]["login"].as_str() {
+        save_twitch_username(login);
+        log_to_file(&format!("[SESSION] Username saved from Helix: {}", login));
+        Ok(())
+    } else {
+        Err("No se pudo obtener username de Helix".to_string())
+    }
 }
 
 #[tauri::command]
@@ -512,16 +647,23 @@ fn is_dev_mode() -> bool {
 
 #[tauri::command]
 fn log_frontend_msg(msg: String) {
-    log_to_file(&format!("[FRONTEND] {}", msg));
+    debug_chat(&format!("[FE] {}", msg));
 }
 
 #[tauri::command]
-async fn has_twitch_session(app: tauri::AppHandle) -> Result<bool, String> {
+async fn has_twitch_session(app: tauri::AppHandle, window_label: Option<String>) -> Result<bool, String> {
+    if load_oauth_token().is_some() {
+        log_to_file("[GQL] has_twitch_session: true (file token)");
+        return Ok(true);
+    }
+
+    let label = window_label.unwrap_or_else(|| "main".to_string());
     let handle = app.clone();
+    let label_clone = label.clone();
     let cookies: Vec<_> = tokio::task::spawn_blocking(move || {
         let webview = handle
-            .get_webview_window("main")
-            .ok_or("Ventana principal no encontrada")?;
+            .get_webview_window(&label_clone)
+            .ok_or(format!("Ventana '{}' no encontrada", label_clone))?;
         webview.cookies().map_err(|e| e.to_string())
     })
     .await
@@ -535,16 +677,55 @@ async fn has_twitch_session(app: tauri::AppHandle) -> Result<bool, String> {
                 .unwrap_or(false)
     });
 
-    log_to_file(&format!("[GQL] has_twitch_session: {}", has_session));
+    log_to_file(&format!("[GQL] has_twitch_session: {} (window='{}')", has_session, label));
     Ok(has_session)
 }
 
 const TWITCH_CLIENT_ID: &str = "hw3wyjrf3nmg3ljsdxkmyawahb25ir";
 
 #[tauri::command]
-fn save_oauth_token_cmd(token: String) -> Result<(), String> {
+async fn save_oauth_token_cmd(app: tauri::AppHandle, token: String) -> Result<(), String> {
     save_oauth_token(&token);
     log_to_file("[OAUTH] Token saved via command from frontend");
+
+    let helix_result = reqwest::Client::new()
+        .get("https://api.twitch.tv/helix/users")
+        .header("Client-ID", TWITCH_CLIENT_ID)
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    match helix_result {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(login) = json["data"][0]["login"].as_str() {
+                    save_twitch_username(login);
+                    log_to_file(&format!("[OAUTH] Username saved from Helix: {}", login));
+                    return Ok(());
+                }
+            }
+        }
+        Err(e) => log_to_file(&format!("[OAUTH] Helix fetch failed: {}", e)),
+    }
+
+    let handle = app.clone();
+    if let Ok(cookies) = tokio::task::spawn_blocking(move || {
+        handle.get_webview_window("main")
+            .ok_or("no main window".to_string())
+            .and_then(|w| w.cookies().map_err(|e| e.to_string()))
+    }).await.unwrap_or(Err("task failed".into())) {
+        if let Some(login_cookie) = cookies.iter().find(|c| {
+            c.name() == "login" && c.domain().map(|d: &str| d.contains("twitch.tv")).unwrap_or(false)
+        }) {
+            let username = login_cookie.value().to_string();
+            if !username.is_empty() {
+                save_twitch_username(&username);
+                log_to_file(&format!("[OAUTH] Username saved from cookie: {}", username));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -557,7 +738,7 @@ fn twitch_oauth_login(app: tauri::AppHandle, force_verify: Option<bool>) -> Resu
     let redirect_port = if tauri::is_dev() { 1420 } else { 9527 };
     let verify_param = if force_verify.unwrap_or(false) { "&force_verify=true" } else { "" };
     let auth_url = format!(
-        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri=http%3A%2F%2Flocalhost%3A{}&response_type=token&scope=user%3Aread%3Afollows{}",
+        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri=http%3A%2F%2Flocalhost%3A{}&response_type=token&scope=user%3Aread%3Afollows+chat%3Aread+chat%3Aedit{}",
         TWITCH_CLIENT_ID, redirect_port, verify_param
     );
 
@@ -742,24 +923,24 @@ fn get_darkchat_default() -> Result<bool, String> {
     Ok(read_darkchat_config())
 }
 
-fn native_incognito_config_path() -> std::path::PathBuf {
+fn chat_nativos_config_path() -> std::path::PathBuf {
     let home = std::env::var("USERPROFILE").unwrap_or_default();
-    std::path::PathBuf::from(home).join(".twitch-ultralight-native-incognito")
+    std::path::PathBuf::from(home).join(".twitch-ultralight-chat-nativos")
 }
 
-fn read_native_incognito_config() -> bool {
-    std::fs::read_to_string(native_incognito_config_path())
+fn read_chat_nativos_config() -> bool {
+    std::fs::read_to_string(chat_nativos_config_path())
         .map(|s| s.trim() == "true")
         .unwrap_or(false)
 }
 
-fn write_native_incognito_config(checked: bool) {
-    let _ = std::fs::write(native_incognito_config_path(), checked.to_string());
+fn write_chat_nativos_config(checked: bool) {
+    let _ = std::fs::write(chat_nativos_config_path(), checked.to_string());
 }
 
 #[tauri::command]
-fn get_native_incognito_default() -> Result<bool, String> {
-    Ok(read_native_incognito_config())
+fn get_chat_nativos_default() -> Result<bool, String> {
+    Ok(read_chat_nativos_config())
 }
 
 #[tauri::command]
@@ -1117,7 +1298,10 @@ async fn connect_readonly_chat(
     app: tauri::AppHandle,
     channel: String,
     window_label: String,
+    auth_type: Option<String>,
 ) -> Result<(), String> {
+    let at = auth_type.clone().unwrap_or_default();
+    debug_chat(&format!("connect_readonly_chat channel='{}' label='{}' auth_type='{}'", channel, window_label, at));
     use futures_util::{SinkExt, StreamExt};
 
     let chat_state = app.state::<Arc<ChatState>>();
@@ -1153,6 +1337,7 @@ async fn connect_readonly_chat(
     let app_clone = app.clone();
     let channel_for_task = channel.clone();
     let label_for_task = window_label.clone();
+    let auth_type_for_task = auth_type.unwrap_or_else(|| "anonymous".to_string());
 
     tokio::spawn(async move {
         let emit_chat = |event: &str, payload: serde_json::Value| {
@@ -1232,14 +1417,24 @@ async fn connect_readonly_chat(
                 continue;
             }
 
-            log_to_file("[CHAT-IRC] → PASS oauth:justinfan12345");
-            if write.send(tokio_tungstenite::tungstenite::Message::Text(
-                "PASS oauth:justinfan12345".into(),
-            )).await.is_err() { continue; }
-            log_to_file("[CHAT-IRC] → NICK justinfan12345");
-            if write.send(tokio_tungstenite::tungstenite::Message::Text(
-                "NICK justinfan12345".into(),
-            )).await.is_err() { continue; }
+            let (pass_cmd, nick_cmd) = if auth_type_for_task == "session" {
+                match load_oauth_token() {
+                    Some(token) => {
+                        let username = load_twitch_username().unwrap_or_else(|| "justinfan12345".to_string());
+                        debug_chat(&format!("PASS session token_len={} nick={}", token.len(), username));
+                        (format!("PASS oauth:{}", token), format!("NICK {}", username))
+                    }
+                    None => {
+                        debug_chat("PASS session: NO TOKEN FOUND, fallback anonymous");
+                        ("PASS oauth:justinfan12345".to_string(), "NICK justinfan12345".to_string())
+                    }
+                }
+            } else {
+                debug_chat("PASS anonymous");
+                ("PASS oauth:justinfan12345".to_string(), "NICK justinfan12345".to_string())
+            };
+            if write.send(tokio_tungstenite::tungstenite::Message::Text(pass_cmd.into())).await.is_err() { continue; }
+            if write.send(tokio_tungstenite::tungstenite::Message::Text(nick_cmd.into())).await.is_err() { continue; }
             log_to_file(&format!("[CHAT-IRC] → JOIN #{}", channel_for_task));
             let join_sent_at = std::time::Instant::now();
             if write.send(tokio_tungstenite::tungstenite::Message::Text(
@@ -1251,7 +1446,7 @@ async fn connect_readonly_chat(
             backoff_secs = 1;
             was_connected = true;
 
-            log_to_file(&format!("[CHAT] Connected to #{} for window {}", channel_for_task, label_for_task));
+            debug_chat(&format!("IRC connected to #{} auth='{}'", channel_for_task, auth_type_for_task));
             emit_chat("chat-reconnect", serde_json::json!("connected"));
 
             let connected_since = std::time::Instant::now();
@@ -1278,6 +1473,17 @@ async fn connect_readonly_chat(
 
                         if text_str.contains("CAP * ACK") {
                             log_to_file(&format!("[CHAT-IRC] ← CAP ACK: {}", text_str));
+                        }
+
+                        if text_str.contains("Login unsuccessful") || text_str.contains("Login authentication failed") {
+                            log_to_file(&format!("[CHAT-AUTH] Token inválido detectado: {}", &text_str[..text_str.len().min(200)]));
+                            let _ = std::fs::remove_file(token_path());
+                            log_to_file("[CHAT-AUTH] Token file eliminado");
+                            emit_chat("chat-auth-failed", serde_json::json!({ "reason": "Token inválido" }));
+                            connection.stop_requested.store(true, Ordering::SeqCst);
+                            break;
+                        } else if text_str.contains("NOTICE") {
+                            debug_chat(&format!("IRC NOTICE: {}", &text_str[..text_str.len().min(200)]));
                         }
 
                         if text_str.starts_with("PING") {
@@ -1371,7 +1577,7 @@ async fn connect_readonly_chat(
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        log_to_file(&format!("[CHAT] Read error: {}", e));
+                        debug_chat(&format!("IRC read error: {}", e));
                         break;
                     }
                 }
@@ -1383,6 +1589,8 @@ async fn connect_readonly_chat(
 
             *connection.sender.lock().await = None;
             connection.connected.store(false, Ordering::SeqCst);
+
+            debug_chat(&format!("IRC disconnected, stop_requested={}", connection.stop_requested.load(Ordering::SeqCst)));
 
             let current_id = connection.connection_id.load(Ordering::SeqCst);
             if !was_connected || current_id != my_id || connection.stop_requested.load(Ordering::SeqCst) {
@@ -1423,6 +1631,62 @@ async fn disconnect_readonly_chat(app: tauri::AppHandle, window_label: String) -
     }
 
     Ok(())
+}
+
+#[tauri::command]
+fn get_twitch_username() -> Option<String> {
+    load_twitch_username()
+}
+
+#[tauri::command]
+async fn send_chat_message(
+    app: tauri::AppHandle,
+    channel: String,
+    message: String,
+    window_label: String,
+) -> Result<(), String> {
+    use futures_util::SinkExt;
+
+    debug_chat(&format!("send_chat_message channel='{}' label='{}' msg='{}'", channel, window_label, message));
+
+    let chat_state = app.state::<Arc<ChatState>>();
+    let connection = {
+        let conns = chat_state.connections.read().await;
+        match conns.get(&window_label) {
+            Some(c) => c.clone(),
+            None => {
+                debug_chat("send_chat_message: NO CONNECTION for this label");
+                return Err("No hay conexion de chat para esta ventana".to_string());
+            }
+        }
+    };
+
+    let connected = connection.connected.load(Ordering::SeqCst);
+    debug_chat(&format!("send_chat_message: connected={}", connected));
+    if !connected {
+        return Err("La conexion de chat no esta activa".to_string());
+    }
+
+    let irc_msg = format!("PRIVMSG #{} :{}", channel, message);
+    let mut sender_guard = connection.sender.lock().await;
+    let sender = match sender_guard.as_mut() {
+        Some(s) => s,
+        None => {
+            debug_chat("send_chat_message: sender is None");
+            return Err("No hay sender disponible".to_string());
+        }
+    };
+
+    match sender.send(tokio_tungstenite::tungstenite::Message::Text(irc_msg.into())).await {
+        Ok(()) => {
+            debug_chat(&format!("send_chat_message: PRIVMSG sent OK"));
+            Ok(())
+        }
+        Err(e) => {
+            debug_chat(&format!("send_chat_message: send ERROR '{}'", e));
+            Err(format!("Error al enviar mensaje: {}", e))
+        }
+    }
 }
 
 #[tauri::command]
@@ -1681,21 +1945,24 @@ fn rebuild_menu(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
     let darkchat_check = CheckMenuItemBuilder::with_id("darkchat-mode", "Modo oscuro")
         .checked(read_darkchat_config())
         .build(app_handle)?;
-    let native_incognito_check =
-        CheckMenuItemBuilder::with_id("native-incognito-chat", "Chat incógnito nativo")
-            .checked(read_native_incognito_config())
+    let chat_nativos_check =
+        CheckMenuItemBuilder::with_id("chat-nativos", "Chat nativos")
+            .checked(read_chat_nativos_config())
             .build(app_handle)?;
     let hide_timestamps_check =
         CheckMenuItemBuilder::with_id("hide-timestamps", "Ocultar timestamps")
             .checked(read_hide_timestamps_config())
             .build(app_handle)?;
+    let cerrar_sesion = MenuItemBuilder::with_id("cerrar-sesion", "Cerrar sesion")
+        .build(app_handle)?;
     let opciones_menu = SubmenuBuilder::new(app_handle, "Opciones")
         .item(&ir_inicio)
         .item(&explorar)
         .item(&incognito_check)
         .item(&darkchat_check)
-        .item(&native_incognito_check)
+        .item(&chat_nativos_check)
         .item(&hide_timestamps_check)
+        .item(&cerrar_sesion)
         .build()?;
     let show_pip = CheckMenuItemBuilder::with_id("show-pip", "PIP")
         .checked(true)
@@ -1719,7 +1986,9 @@ fn rebuild_menu(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
         .item(&opciones_menu)
         .item(&ver_menu)
         .build()?;
-    app_handle.set_menu(menu)?;
+    if let Some(main) = app_handle.get_webview_window("main") {
+        main.set_menu(menu)?;
+    }
     Ok(())
 }
 
@@ -1744,18 +2013,22 @@ pub fn run() {
             twitch_oauth_login,
             get_incognito_default,
             get_darkchat_default,
-            get_native_incognito_default,
+            get_chat_nativos_default,
             get_hide_timestamps_default,
             set_menu_visible,
             is_dev_mode,
             log_frontend_msg,
             connect_readonly_chat,
             disconnect_readonly_chat,
+            send_chat_message,
             lookup_channel_id,
             lookup_stream_info,
             fetch_chat_emotes,
             fetch_chat_badges,
-            fetch_bttv_emotes
+            fetch_bttv_emotes,
+            save_session_from_cookies,
+            save_username_from_token,
+            get_twitch_username
         ])
         .setup(|app| {
             log_to_file("[APP] Tauri setup started");
@@ -1834,12 +2107,12 @@ pub fn run() {
                     let _ = main.emit("darkchat-mode", new);
                 }
             }
-            "native-incognito-chat" => {
-                let current = read_native_incognito_config();
+            "chat-nativos" => {
+                let current = read_chat_nativos_config();
                 let new = !current;
-                write_native_incognito_config(new);
+                write_chat_nativos_config(new);
                 if let Some(main) = app.get_webview_window("main") {
-                    let _ = main.emit("native-incognito-chat", new);
+                    let _ = main.emit("chat-nativos", new);
                 }
             }
             "hide-timestamps" => {
@@ -1853,6 +2126,11 @@ pub fn run() {
             "show-pip" | "show-quality" | "show-speed" | "show-latency" => {
                 if let Some(main) = app.get_webview_window("main") {
                     let _ = main.emit(event.id().as_ref(), ());
+                }
+            }
+            "cerrar-sesion" => {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.emit("cerrar-sesion", ());
                 }
             }
             _ => {}

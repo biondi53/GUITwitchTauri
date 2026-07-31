@@ -38,6 +38,11 @@
     "allow-fetch-chat-badges",
     "allow-fetch-bttv-emotes",
     "allow-get-native-incognito-default",
-    "allow-get-hide-timestamps-default"
+    "allow-get-chat-nativos-default",
+    "allow-get-hide-timestamps-default",
+    "allow-send-chat-message",
+    "allow-save-session-from-cookies",
+    "allow-save-username-from-token",
+    "allow-get-twitch-username"
   ]
 }

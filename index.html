@@ -77,6 +77,14 @@
           <div id="user-list-items" class="user-list-items"></div>
         </div>
         <button id="new-messages-btn" class="new-messages-btn hidden">Nuevos mensajes</button>
+        <div id="chat-input-container" class="chat-input-container hidden">
+          <input type="text" id="chat-input" class="chat-input" placeholder="Escribe un mensaje..." maxlength="500" />
+          <button id="chat-send-btn" class="chat-send-btn" title="Enviar mensaje">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M1.5 1.2L14.8 7.8L1.5 14.4V9.6L10 8L1.5 6.4V1.2Z"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <iframe id="chat" allowfullscreen></iframe>
     </div>
