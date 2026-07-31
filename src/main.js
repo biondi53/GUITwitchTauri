@@ -102,7 +102,7 @@ let isDarkChat = sessionStorage.getItem("twitch_darkchat") === "true";
 let isChatNativos = sessionStorage.getItem("twitch_chat_nativos") === "true";
 let isCustomSession = false;
 let isHideTimestamps = sessionStorage.getItem("twitch_hide_timestamps") === "true";
-let currentLiveSyncDuration = 1;
+let currentLiveSyncDuration = 2;
 let stallResetTimeout = null;
 let stallResetCount = 0;
 let nextResetTime = 0;
@@ -887,7 +887,7 @@ videoPlayer.addEventListener("ratechange", () => {
 
 speedSelect.addEventListener("change", () => {
   if (speedSelect.value === "auto") {
-    if (hls) hls.config.maxLiveSyncPlaybackRate = 1.1;
+    if (hls) hls.config.maxLiveSyncPlaybackRate = 1.25;
     autoSpeedDisplay.textContent = "";
     fastForwardIndicator.classList.add("hidden");
   } else {
@@ -895,14 +895,14 @@ speedSelect.addEventListener("change", () => {
     videoPlayer.playbackRate = parseFloat(speedSelect.value);
     autoSpeedDisplay.textContent = "";
     fastForwardIndicator.classList.add("hidden");
-    currentLiveSyncDuration = 1;
-    livesyncInput.value = 1;
-    if (hls) hls.targetLatency = 1;
+    currentLiveSyncDuration = 2;
+    livesyncInput.value = 2;
+    if (hls) hls.targetLatency = 2;
   }
 });
 
 livesyncInput.addEventListener("change", () => {
-  const val = Math.max(1, Math.min(8, parseInt(livesyncInput.value) || 2));
+  const val = Math.max(1, Math.min(3, parseInt(livesyncInput.value) || 2));
   currentLiveSyncDuration = val;
   livesyncInput.value = val;
   if (hls) hls.targetLatency = val;
@@ -1253,7 +1253,7 @@ function scheduleStallReset() {
     if (hls?.latencyController) {
       const currentTarget = hls.targetLatency;
       hls.latencyController.stallCount = 0;
-      currentLiveSyncDuration = Math.max(1, currentTarget - 0.5);
+      currentLiveSyncDuration = Math.max(2, currentTarget - 0.5);
       hls.config.liveSyncDuration = currentLiveSyncDuration;
       livesyncInput.value = currentLiveSyncDuration;
     }
@@ -1284,18 +1284,20 @@ function startPlayback(url) {
     hls = null;
   }
   stopLatencyDisplay();
-  currentLiveSyncDuration = 1;
+  currentLiveSyncDuration = 2;
   stallResetCount = 0;
-  livesyncInput.value = 1;
+  livesyncInput.value = 2;
 
   if (typeof Hls !== "undefined" && Hls.isSupported()) {
     hls = new Hls({
       liveSyncDuration: currentLiveSyncDuration,
+      liveMaxLatencyDuration: 3.5,
       maxBufferLength: 5,
       maxMaxBufferLength: 15,
       backBufferLength: 0,
       lowLatencyMode: true,
-      maxLiveSyncPlaybackRate: 1.1,
+      maxLiveSyncPlaybackRate: 1.25,
+      liveSyncOnStallIncrease: 0,
     });
     speedSelect.value = "auto";
     hls.loadSource(url);
@@ -1334,7 +1336,7 @@ function startPlayback(url) {
     hls.on(Hls.Events.FRAG_BUFFERED, () => {
       if (!initialSeekDone && hls.latency != null) {
         const liveEdge = hls.latency + videoPlayer.currentTime;
-        const target = liveEdge - 1;
+        const target = hls.liveSyncPosition ?? liveEdge - 1;
         const buffered = videoPlayer.buffered;
         for (let i = 0; i < buffered.length; i++) {
           if (buffered.start(i) <= target && buffered.end(i) >= target) {
