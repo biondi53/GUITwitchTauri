@@ -178,6 +178,7 @@ async function disconnectReadonlyChat() {
     const userListPanel = document.getElementById("user-list-panel");
     if (userListPanel) userListPanel.classList.add("hidden");
     userListVisible = false;
+    updateChatInputVisibility();
   } catch (err) {
     console.error("[CHAT] disconnect error:", err);
   }
@@ -1688,9 +1689,8 @@ listen("chat-nativos", async (event) => {
   sessionStorage.setItem("twitch_chat_nativos", isChatNativos);
   if (currentChannel) {
     if (isChatNativos) {
-      if (shouldUseReadonlyChat()) {
-        await disconnectReadonlyChat();
-      }
+      isIncognito = !isCustomSession;
+      await disconnectReadonlyChat();
       const newIframe = createChatIframe(currentChannel, isIncognito, isDarkChat);
       chatIframe.replaceWith(newIframe);
       chatIframe = newIframe;
@@ -1701,6 +1701,7 @@ listen("chat-nativos", async (event) => {
       isCustomSession = !isIncognito;
       await connectReadonlyChat(currentChannel, { clearMessages: true, authType: isCustomSession ? "session" : "anonymous" });
     }
+    await updateAuthButtons();
   }
 });
 
