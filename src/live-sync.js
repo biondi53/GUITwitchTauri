@@ -2,12 +2,14 @@ export const RESYNC_COOLDOWN_MS = 3000;
 export const RESYNC_THRESHOLD_OFFSET_S = 2;
 export const INITIAL_CORRECT_MARGIN_S = 1;
 export const FORWARD_MARGIN_S = 1;
+export const LIVE_EDGE_S = 2;
 
 export function computeResync({
   latency,
   targetLatency,
   liveSyncPosition,
   currentTime,
+  edge,
   lastResyncAt,
   now,
   isAuto,
@@ -17,9 +19,16 @@ export function computeResync({
   if (latency == null || liveSyncPosition == null) return null;
   if (latency <= targetLatency + RESYNC_THRESHOLD_OFFSET_S) return null;
   if (now - lastResyncAt < RESYNC_COOLDOWN_MS) return null;
-  if (!bufferCovers(liveSyncPosition)) return null;
-  if (liveSyncPosition - currentTime <= FORWARD_MARGIN_S) return null;
-  return { target: liveSyncPosition };
+  const aggressive = edge != null ? edge - LIVE_EDGE_S : null;
+  let target = null;
+  if (aggressive != null && bufferCovers(aggressive)) {
+    target = aggressive;
+  } else if (bufferCovers(liveSyncPosition)) {
+    target = liveSyncPosition;
+  }
+  if (target == null) return null;
+  if (target - currentTime <= FORWARD_MARGIN_S) return null;
+  return { target };
 }
 
 export function runResyncTick({
@@ -27,6 +36,7 @@ export function runResyncTick({
   targetLatency,
   liveSyncPosition,
   currentTime,
+  edge,
   lastResyncAt,
   now,
   isAuto,
@@ -37,6 +47,7 @@ export function runResyncTick({
     targetLatency,
     liveSyncPosition,
     currentTime,
+    edge,
     lastResyncAt,
     now,
     isAuto,
@@ -51,12 +62,14 @@ export function runResyncTick({
 export function computeInitialCorrection({
   currentTime,
   liveSyncPosition,
+  edge,
   initialCorrectionDone,
   bufferCovers,
 }) {
   if (initialCorrectionDone) return null;
   if (liveSyncPosition == null) return null;
-  if (liveSyncPosition - currentTime <= INITIAL_CORRECT_MARGIN_S) return null;
-  if (!bufferCovers(liveSyncPosition)) return null;
-  return { target: liveSyncPosition };
+  const target = edge != null ? edge - LIVE_EDGE_S : liveSyncPosition;
+  if (target - currentTime <= INITIAL_CORRECT_MARGIN_S) return null;
+  if (!bufferCovers(target)) return null;
+  return { target };
 }

@@ -1339,11 +1339,14 @@ function startPlayback(url) {
       videoPlayer.play().catch(() => {});
       latencyInterval = setInterval(() => {
         if (hls && hls.latency != null) {
+          const details = hls.levels?.[hls.currentLevel]?.details;
+          const edge = details?.edge;
           const resync = runResyncTick({
             latency: hls.latency,
             targetLatency: hls.targetLatency ?? currentLiveSyncDuration,
             liveSyncPosition: hls.liveSyncPosition,
             currentTime: videoPlayer.currentTime,
+            edge,
             lastResyncAt,
             now: Date.now(),
             isAuto: speedSelect.value === "auto",
@@ -1355,11 +1358,13 @@ function startPlayback(url) {
               to: resync.target,
               latency: hls.latency,
               liveSyncPosition: hls.liveSyncPosition,
+              edge,
             });
             videoPlayer.currentTime = resync.target;
             lastResyncAt = resync.lastResyncAt;
           }
-          const displayDelay = hls.latency + 1;
+          const displayDelay =
+            edge != null ? Math.max(0, edge - videoPlayer.currentTime) : hls.latency + 1;
           latencyDisplay.textContent = `Delay: ${displayDelay.toFixed(1)}s`;
           latencyDisplay.classList.toggle("latency-high", displayDelay > 7);
           targetLatencyDisplay.textContent = `Target: ${hls.targetLatency?.toFixed(1) ?? "?"}s`;
@@ -1393,6 +1398,7 @@ function startPlayback(url) {
               const correction = computeInitialCorrection({
                 currentTime: videoPlayer.currentTime,
                 liveSyncPosition: hls.liveSyncPosition,
+                edge: hls.levels?.[hls.currentLevel]?.details?.edge,
                 initialCorrectionDone,
                 bufferCovers: isPositionBuffered,
               });

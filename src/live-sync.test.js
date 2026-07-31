@@ -8,6 +8,7 @@ import {
   RESYNC_COOLDOWN_MS,
   RESYNC_THRESHOLD_OFFSET_S,
   INITIAL_CORRECT_MARGIN_S,
+  LIVE_EDGE_S,
 } from "./live-sync.js";
 
 const NOW = 100_000;
@@ -175,6 +176,52 @@ test("computeResync no busca cuando el target adelanta menos que el margen minim
   assert.equal(result, null);
 });
 
+test("computeResync apunta a edge - LIVE_EDGE_S en lugar del clamp conservador", () => {
+  const result = computeResync({
+    latency: 7,
+    targetLatency: 2,
+    liveSyncPosition: 494,
+    currentTime: 490,
+    edge: 500,
+    lastResyncAt: 0,
+    now: NOW,
+    isAuto: true,
+    bufferCovers: covers,
+  });
+  assert.deepEqual(result, { target: 500 - LIVE_EDGE_S });
+});
+
+test("computeResync cae a liveSyncPosition si edge - LIVE_EDGE_S no esta buffered", () => {
+  const coversOnly494 = (pos) => pos === 494;
+  const result = computeResync({
+    latency: 7,
+    targetLatency: 2,
+    liveSyncPosition: 494,
+    currentTime: 490,
+    edge: 500,
+    lastResyncAt: 0,
+    now: NOW,
+    isAuto: true,
+    bufferCovers: coversOnly494,
+  });
+  assert.deepEqual(result, { target: 494 });
+});
+
+test("computeResync no busca si edge - LIVE_EDGE_S no adelanta con margen", () => {
+  const result = computeResync({
+    latency: 7,
+    targetLatency: 2,
+    liveSyncPosition: 494,
+    currentTime: 497.5,
+    edge: 500,
+    lastResyncAt: 0,
+    now: NOW,
+    isAuto: true,
+    bufferCovers: covers,
+  });
+  assert.equal(result, null);
+});
+
 test("computeInitialCorrection corrige el landing cuando el target fresco adelanta", () => {
   const result = computeInitialCorrection({
     currentTime: liveSyncPosition - 3,
@@ -223,6 +270,17 @@ test("computeInitialCorrection no actua si el buffer no cubre el target", () => 
     bufferCovers: notCovers,
   });
   assert.equal(result, null);
+});
+
+test("computeInitialCorrection apunta a edge - LIVE_EDGE_S", () => {
+  const result = computeInitialCorrection({
+    currentTime: 494 - 3,
+    liveSyncPosition: 494,
+    edge: 500,
+    initialCorrectionDone: false,
+    bufferCovers: covers,
+  });
+  assert.deepEqual(result, { target: 500 - LIVE_EDGE_S });
 });
 
 test("runResyncTick devuelve target y lastResyncAt actualizado cuando hay resync", () => {
