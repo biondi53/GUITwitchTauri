@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { runResyncTick, computeInitialCorrection } from "./live-sync.js";
 
 const isPlayerWindow = window.location.hash.startsWith("#player/");
 const chatChannel = isPlayerWindow ? window.location.hash.slice("#player/".length) : null;
@@ -105,6 +106,9 @@ let isHideTimestamps = sessionStorage.getItem("twitch_hide_timestamps") === "tru
 let currentLiveSyncDuration = 2;
 let stallResetTimeout = null;
 let stallResetCount = 0;
+let lastResyncAt = 0;
+let initialCorrectionDone = true;
+const INITIAL_CORRECT_DELAY_MS = 2500;
 let nextResetTime = 0;
 let gridRefreshInterval = null;
 let needsForceVerify = false;
@@ -1289,6 +1293,14 @@ function stopLatencyDisplay() {
   stallCountDisplay.textContent = "";
 }
 
+function isPositionBuffered(pos) {
+  const buffered = videoPlayer.buffered;
+  for (let i = 0; i < buffered.length; i++) {
+    if (buffered.start(i) <= pos && buffered.end(i) >= pos) return true;
+  }
+  return false;
+}
+
 function startPlayback(url) {
   if (hls) {
     hls.destroy();
@@ -1297,6 +1309,8 @@ function startPlayback(url) {
   stopLatencyDisplay();
   currentLiveSyncDuration = 2;
   stallResetCount = 0;
+  lastResyncAt = 0;
+  initialCorrectionDone = false;
   livesyncInput.value = 2;
 
   if (typeof Hls !== "undefined" && Hls.isSupported()) {
@@ -1325,6 +1339,26 @@ function startPlayback(url) {
       videoPlayer.play().catch(() => {});
       latencyInterval = setInterval(() => {
         if (hls && hls.latency != null) {
+          const resync = runResyncTick({
+            latency: hls.latency,
+            targetLatency: hls.targetLatency ?? currentLiveSyncDuration,
+            liveSyncPosition: hls.liveSyncPosition,
+            currentTime: videoPlayer.currentTime,
+            lastResyncAt,
+            now: Date.now(),
+            isAuto: speedSelect.value === "auto",
+            bufferCovers: isPositionBuffered,
+          });
+          if (resync.target != null) {
+            console.log("[resync]", {
+              from: videoPlayer.currentTime,
+              to: resync.target,
+              latency: hls.latency,
+              liveSyncPosition: hls.liveSyncPosition,
+            });
+            videoPlayer.currentTime = resync.target;
+            lastResyncAt = resync.lastResyncAt;
+          }
           const displayDelay = hls.latency + 1;
           latencyDisplay.textContent = `Delay: ${displayDelay.toFixed(1)}s`;
           latencyDisplay.classList.toggle("latency-high", displayDelay > 7);
@@ -1354,6 +1388,20 @@ function startPlayback(url) {
             initialSeekDone = true;
             videoPlayer.currentTime = target;
             videoPlayer.play().catch(() => {});
+            setTimeout(() => {
+              if (!hls || initialCorrectionDone) return;
+              const correction = computeInitialCorrection({
+                currentTime: videoPlayer.currentTime,
+                liveSyncPosition: hls.liveSyncPosition,
+                initialCorrectionDone,
+                bufferCovers: isPositionBuffered,
+              });
+              if (correction) {
+                videoPlayer.currentTime = correction.target;
+                videoPlayer.play().catch(() => {});
+              }
+              initialCorrectionDone = true;
+            }, INITIAL_CORRECT_DELAY_MS);
             break;
           }
         }
