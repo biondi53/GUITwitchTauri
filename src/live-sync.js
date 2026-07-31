@@ -1,11 +1,13 @@
 export const RESYNC_COOLDOWN_MS = 3000;
 export const RESYNC_THRESHOLD_OFFSET_S = 2;
 export const INITIAL_CORRECT_MARGIN_S = 1;
+export const FORWARD_MARGIN_S = 1;
 
 export function computeResync({
   latency,
   targetLatency,
   liveSyncPosition,
+  currentTime,
   lastResyncAt,
   now,
   isAuto,
@@ -16,6 +18,7 @@ export function computeResync({
   if (latency <= targetLatency + RESYNC_THRESHOLD_OFFSET_S) return null;
   if (now - lastResyncAt < RESYNC_COOLDOWN_MS) return null;
   if (!bufferCovers(liveSyncPosition)) return null;
+  if (liveSyncPosition - currentTime <= FORWARD_MARGIN_S) return null;
   return { target: liveSyncPosition };
 }
 

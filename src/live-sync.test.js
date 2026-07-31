@@ -133,6 +133,48 @@ test("computeResync no actua sin latency disponible", () => {
   assert.equal(result, null);
 });
 
+test("computeResync no busca hacia atras cuando liveSyncPosition quedo detras del playhead", () => {
+  const result = computeResync({
+    latency: 5.5,
+    targetLatency: 2,
+    liveSyncPosition: 100,
+    currentTime: 100.5,
+    lastResyncAt: 0,
+    now: NOW,
+    isAuto: true,
+    bufferCovers: covers,
+  });
+  assert.equal(result, null);
+});
+
+test("computeResync permite seek hacia adelante con margen suficiente", () => {
+  const result = computeResync({
+    latency: 6,
+    targetLatency: 2,
+    liveSyncPosition: 500,
+    currentTime: 495,
+    lastResyncAt: 0,
+    now: NOW,
+    isAuto: true,
+    bufferCovers: covers,
+  });
+  assert.deepEqual(result, { target: 500 });
+});
+
+test("computeResync no busca cuando el target adelanta menos que el margen minimo", () => {
+  const result = computeResync({
+    latency: 6,
+    targetLatency: 2,
+    liveSyncPosition: 500,
+    currentTime: 499.5,
+    lastResyncAt: 0,
+    now: NOW,
+    isAuto: true,
+    bufferCovers: covers,
+  });
+  assert.equal(result, null);
+});
+
 test("computeInitialCorrection corrige el landing cuando el target fresco adelanta", () => {
   const result = computeInitialCorrection({
     currentTime: liveSyncPosition - 3,
