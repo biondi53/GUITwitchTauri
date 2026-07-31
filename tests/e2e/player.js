@@ -78,7 +78,7 @@ async function main() {
       stalled: stalledSince != null,
       readyState: video.readyState,
     });
-    statusEl.textContent = `t=${telemetry.length} delay=${realDelay?.toFixed(1)}s action=${action} playing=${!video.paused}`;
+    statusEl.textContent = `t=${telemetry.length} delay=${realDelay?.toFixed(1)}s hls=${hls.latency?.toFixed(1)}s action=${action} playing=${!video.paused}`;
   }, 1000);
 }
 

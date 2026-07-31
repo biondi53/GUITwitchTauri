@@ -48,6 +48,8 @@ try {
   };
   const realDelays = late.map((t) => t.realDelay);
   const maxDelay = Math.max(...realDelays, 0);
+  const hlsLatencies = late.map((t) => t.hlsLatency).filter((v) => v != null);
+  const maxHlsLatency = Math.max(...hlsLatencies, 0);
   const stalled = late.filter((t) => t.stalled).length;
   const actions = late.map((t) => t.action);
   const seeksLate = actions.filter((a) => a !== "idle");
@@ -58,6 +60,8 @@ try {
   console.log("seeks en ultimos 60s:", seeksLate.length);
   console.log("realDelay mediana (ult 60s):", median(realDelays).toFixed(2), "s");
   console.log("realDelay max (ult 60s):", maxDelay.toFixed(2), "s");
+  console.log("hlsLatency mediana (ult 60s):", median(hlsLatencies).toFixed(2), "s");
+  console.log("hlsLatency max (ult 60s):", maxHlsLatency.toFixed(2), "s");
   console.log("stalls (ult 60s):", stalled);
   console.log("console msg:", consoleMsgs.length);
 
@@ -72,6 +76,21 @@ try {
   }
   if (maxDelay > 6) {
     console.log(`FAIL: picos de delay altos (max ${maxDelay.toFixed(2)}s)`);
+    ok = false;
+  }
+  if (median(hlsLatencies) > 5) {
+    console.log(`FAIL: hlsLatency (delay vs Twitch) no converge (mediana ${median(hlsLatencies).toFixed(2)}s)`);
+    ok = false;
+  }
+  if (maxHlsLatency > 8) {
+    console.log(`FAIL: picos de hlsLatency altos (max ${maxHlsLatency.toFixed(2)}s)`);
+    ok = false;
+  }
+  const ageNeg = late.filter(
+    (t) => t.realDelay != null && t.hlsLatency != null && t.hlsLatency < t.realDelay - 0.05
+  );
+  if (ageNeg.length) {
+    console.log("FAIL: hlsLatency < realDelay (age negativo):", ageNeg.length);
     ok = false;
   }
   if (stalled > Math.max(2, late.length * 0.1)) {
