@@ -1314,7 +1314,7 @@ function startPlayback(url) {
       videoPlayer.play().catch(() => {});
       latencyInterval = setInterval(() => {
         if (hls && hls.latency != null) {
-          const displayDelay = hls.latency + 2;
+          const displayDelay = hls.latency + 1;
           latencyDisplay.textContent = `Delay: ${displayDelay.toFixed(1)}s`;
           latencyDisplay.classList.toggle("latency-high", displayDelay > 7);
           targetLatencyDisplay.textContent = `Target: ${hls.targetLatency?.toFixed(1) ?? "?"}s`;
