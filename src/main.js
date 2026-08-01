@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { runResyncTick, computeInitialCorrection, updateResyncGate, LIVE_EDGE_S, RESYNC_THRESHOLD_OFFSET_S } from "./live-sync.js";
+import { shouldRefreshGrid, buildThumbnailUrl } from "./grid-refresh.js";
 
 const isPlayerWindow = window.location.hash.startsWith("#player/");
 const chatChannel = isPlayerWindow ? window.location.hash.slice("#player/".length) : null;
@@ -35,6 +37,7 @@ const gridScreen = document.getElementById("grid-screen");
 const gridHeader = document.querySelector(".grid-header");
 const gridContainer = document.getElementById("grid-container");
 const gridTitle = document.getElementById("grid-title");
+const gridRefreshBtn = document.getElementById("grid-refresh-btn");
 const gridManualBtn = document.getElementById("grid-manual-btn");
 const readonlyChat = document.getElementById("readonly-chat");
 const readonlyChatMessages = document.getElementById("readonly-chat-messages");
@@ -112,7 +115,8 @@ let manualSeekPending = false;
 let lastPlayheadPosition = null;
 const INITIAL_CORRECT_DELAY_MS = 2500;
 let nextResetTime = 0;
-let gridRefreshInterval = null;
+let lastGridRefreshAt = 0;
+let gridFocusWatcherStarted = false;
 let needsForceVerify = false;
 
 let _isDevMode = null;
@@ -1187,8 +1191,11 @@ function updateChatInputVisibility() {
   setupChatInput();
 }
 
+gridRefreshBtn.addEventListener("click", () => {
+  refreshGrid({ forceFresh: true });
+});
+
 gridManualBtn.addEventListener("click", async () => {
-  stopGridRefresh();
   if (currentChannel && shouldUseReadonlyChat()) {
     await disconnectReadonlyChat();
   }
@@ -1200,8 +1207,7 @@ gridManualBtn.addEventListener("click", async () => {
 
 document.getElementById("back-to-grid-btn")?.addEventListener("click", () => {
   hideError();
-  connectScreen.classList.add("hidden");
-  gridScreen.classList.remove("hidden");
+  showGridScreen();
 });
 
 document.getElementById("grid-logout-btn")?.addEventListener("click", async () => {
@@ -1469,7 +1475,7 @@ function setConnecting(state) {
   connectBtn.textContent = state ? "CONECTANDO..." : "CONECTAR";
 }
 
-async function fetchFollowedStreams() {
+async function fetchFollowedStreams({ forceFresh = false } = {}) {
   const hasOAuth = await invoke("has_twitch_oauth");
   if (!hasOAuth) return null;
 
@@ -1485,7 +1491,7 @@ async function fetchFollowedStreams() {
         title: edge.node.stream.title || "",
         game: edge.node.stream.game?.name || "",
         viewers: edge.node.stream.viewersCount || 0,
-        thumbnail: `https://static-cdn.jtvnw.net/previews-ttv/live_user_${edge.node.login}-320x180.jpg`,
+        thumbnail: buildThumbnailUrl(edge.node.login, { forceFresh }),
         profileImage: edge.node.profileImageURL || "",
       }));
   } catch (err) {
@@ -1551,23 +1557,33 @@ function renderGrid(streams) {
   gridTitle.textContent = `${streams.length} Canales en vivo`;
 }
 
-function stopGridRefresh() {
-  if (gridRefreshInterval) {
-    clearInterval(gridRefreshInterval);
-    gridRefreshInterval = null;
-  }
+async function refreshGrid({ forceFresh = false } = {}) {
+  const streams = await fetchFollowedStreams({ forceFresh });
+  if (!streams) return;
+  renderGrid(streams);
+  lastGridRefreshAt = Date.now();
 }
 
-function startGridRefresh() {
-  stopGridRefresh();
-  gridRefreshInterval = setInterval(async () => {
-    const streams = await fetchFollowedStreams();
-    if (streams) renderGrid(streams);
-  }, 90000);
+async function maybeRefreshGrid() {
+  if (!shouldRefreshGrid({ lastRefreshAt: lastGridRefreshAt })) return;
+  await refreshGrid();
+}
+
+function startGridFocusWatcher() {
+  if (gridFocusWatcherStarted) return;
+  gridFocusWatcherStarted = true;
+  getCurrentWindow()
+    .onFocusChanged(({ payload }) => {
+      if (payload) maybeRefreshGrid();
+    })
+    .catch((e) => console.error("[GRID] onFocusChanged error:", e));
+  setInterval(() => {
+    if (document.hasFocus()) maybeRefreshGrid();
+  }, 30000);
 }
 
 async function showGridScreen() {
-  stopGridRefresh();
+  startGridFocusWatcher();
   connectScreen.classList.add("hidden");
   streamLayout.classList.add("hidden");
   gridScreen.classList.remove("hidden");
@@ -1592,7 +1608,6 @@ async function showGridScreen() {
       }
     });
     document.getElementById("grid-loading-manual-btn")?.addEventListener("click", async () => {
-      stopGridRefresh();
       gridScreen.classList.add("hidden");
       connectScreen.classList.remove("hidden");
       channelInput.focus();
@@ -1606,7 +1621,9 @@ async function showGridScreen() {
 
   const streams = await fetchFollowedStreams();
   renderGrid(streams);
-  startGridRefresh();
+  if (streams) {
+    lastGridRefreshAt = Date.now();
+  }
 }
 
 async function openPlayerWindow(channel, displayName, title) {
@@ -1633,7 +1650,6 @@ async function openPlayerWindow(channel, displayName, title) {
 }
 
 async function connectToChannel(channel, cardEl, displayName, title) {
-  stopGridRefresh();
   await openPlayerWindow(channel, displayName, title);
 }
 
