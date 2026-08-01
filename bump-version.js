@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
+import { readCurrentVersion, nextVersion, TAG_PREFIX } from "./release-utils.js";
 
 const args = process.argv.slice(2);
 const type = args[0] || "patch";
@@ -12,8 +13,6 @@ const CONFIG = {
   cargoToml: { path: "src-tauri/Cargo.toml", kind: "toml-package" },
   cargoLock: { path: "src-tauri/Cargo.lock", kind: "toml-crate" },
 };
-
-const TAG_PREFIX = "v";
 
 function fail(msg) {
   console.error(`[bump] ${msg}`);
@@ -92,30 +91,13 @@ function syncFile(cfg, newVersion) {
   }
 }
 
-function readCurrentVersion() {
-  const obj = readJson(CONFIG.tauri.path);
-  return obj[CONFIG.tauri.key];
+const current = readCurrentVersion(CONFIG.tauri.path);
+let newVersion;
+try {
+  newVersion = nextVersion(current, type);
+} catch (e) {
+  fail(e.message);
 }
-
-function nextVersion(current, type) {
-  const parts = current.split(".").map(Number);
-  if (parts.some((n) => Number.isNaN(n))) fail(`versión actual inválida: ${current}`);
-  const [major, minor, patch] = parts;
-  switch (type) {
-    case "major":
-      return `${major + 1}.0.0`;
-    case "minor":
-      return `${major}.${minor + 1}.0`;
-    case "patch":
-      return `${major}.${minor}.${patch + 1}`;
-    default:
-      if (/^\d+\.\d+\.\d+$/.test(type)) return type;
-      fail(`tipo inválido: '${type}' (usa patch, minor, major o X.Y.Z)`);
-  }
-}
-
-const current = readCurrentVersion();
-const newVersion = nextVersion(current, type);
 if (newVersion === current) fail(`la versión ya es ${current}`);
 
 for (const cfg of Object.values(CONFIG)) {
