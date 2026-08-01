@@ -1,4 +1,27 @@
-target/
+# Dependencias y build
 node_modules/
+target/
 dist/
+
+# Binarios / recursos locales de build
+Instaladores Estables/
+src-tauri/resources/streamlink-portable.zip
+
+# Notas y configuracion interna del desarrollador
+AGENTS.md
+AGENTS.mdBACKUP
+progreso.md
+fixcerrarsesion.md
+swapchats.md
+temp.js
+plan-streamlink-portable-2025-07-19.md
+docs/
+
+# Logs
 *.log
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
