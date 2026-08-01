@@ -1672,14 +1672,13 @@ async fn connect_readonly_chat(
     Ok(())
 }
 
-#[tauri::command]
-async fn disconnect_readonly_chat(app: tauri::AppHandle, window_label: String) -> Result<(), String> {
+async fn disconnect_chat_for_window(app: &tauri::AppHandle, window_label: &str) {
     use futures_util::SinkExt;
 
     let chat_state = app.state::<Arc<ChatState>>();
     let mut conns = chat_state.connections.write().await;
 
-    if let Some(connection) = conns.remove(&window_label) {
+    if let Some(connection) = conns.remove(window_label) {
         connection.connected.store(false, Ordering::SeqCst);
         connection.stop_requested.store(true, Ordering::SeqCst);
 
@@ -1692,7 +1691,11 @@ async fn disconnect_readonly_chat(app: tauri::AppHandle, window_label: String) -
 
         log_to_file(&format!("[CHAT] Disconnected window {}", window_label));
     }
+}
 
+#[tauri::command]
+async fn disconnect_readonly_chat(app: tauri::AppHandle, window_label: String) -> Result<(), String> {
+    disconnect_chat_for_window(&app, &window_label).await;
     Ok(())
 }
 
@@ -2143,6 +2146,11 @@ pub fn run() {
                     if label.starts_with("player") {
                         log_to_file(&format!("[WINDOW] Player '{}' destroyed, pending menu refresh", label));
                         MENU_REFRESH_PENDING.store(true, Ordering::SeqCst);
+                        let app_handle = window.app_handle().clone();
+                        let label_owned = label.to_string();
+                        tauri::async_runtime::spawn(async move {
+                            disconnect_chat_for_window(&app_handle, &label_owned).await;
+                        });
                     }
                 }
                 tauri::WindowEvent::Focused(true) => {

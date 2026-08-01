@@ -106,6 +106,7 @@ let isIncognito = sessionStorage.getItem("twitch_incognito") === "true";
 let isDarkChat = sessionStorage.getItem("twitch_darkchat") === "true";
 let isChatNativos = sessionStorage.getItem("twitch_chat_nativos") === "true";
 let isCustomSession = false;
+let readonlyChatConnected = false;
 let isHideTimestamps = sessionStorage.getItem("twitch_hide_timestamps") === "true";
 let chatLayoutMode = 0;
 let currentLiveSyncDuration = 2;
@@ -166,6 +167,7 @@ async function connectReadonlyChat(channel, { clearMessages = true, authType = "
     }
 
     await invoke("connect_readonly_chat", { channel, windowLabel, authType });
+    readonlyChatConnected = true;
     updateChatInputVisibility();
   } catch (err) {
     console.error("[CHAT] connect error:", err);
@@ -175,6 +177,7 @@ async function connectReadonlyChat(channel, { clearMessages = true, authType = "
 async function disconnectReadonlyChat() {
   try {
     await invoke("disconnect_readonly_chat", { windowLabel: getCurrentWebviewWindow().label });
+    readonlyChatConnected = false;
     readonlyChatMessages.innerHTML = "";
     readonlyChat.classList.add("hidden");
     chatRoomState.classList.add("hidden");
@@ -195,6 +198,23 @@ async function disconnectReadonlyChat() {
   } catch (err) {
     console.error("[CHAT] disconnect error:", err);
   }
+}
+
+function hideReadonlyChat() {
+  readonlyChat.classList.add("hidden");
+  const userListBtn = document.getElementById("user-list-btn");
+  if (userListBtn) userListBtn.classList.add("hidden");
+  const userListPanel = document.getElementById("user-list-panel");
+  if (userListPanel) userListPanel.classList.add("hidden");
+  userListVisible = false;
+  updateChatInputVisibility();
+}
+
+function showReadonlyChat() {
+  readonlyChat.classList.remove("hidden");
+  const userListBtn = document.getElementById("user-list-btn");
+  if (userListBtn) userListBtn.classList.remove("hidden");
+  updateChatInputVisibility();
 }
 
 async function fetchChannelEmotesAndBadges(channel) {
@@ -413,7 +433,7 @@ function buildMessageDiv(msg, isGrouped) {
 }
 
 function renderChatMessage(msg, opts = {}) {
-  if (!shouldUseReadonlyChat()) return null;
+  if (!readonlyChatConnected) return null;
   if (msg.username) addChatUser(msg.username);
 
   if (msg.system_type) {
@@ -800,7 +820,7 @@ if (chatChannel) {
 
   listen("chat-room-state", (event) => {
     if (event.payload.channel !== chatChannel) return;
-    if (!shouldUseReadonlyChat()) return;
+    if (!readonlyChatConnected) return;
     const state = event.payload.payload;
 
     const parts = [];
@@ -818,7 +838,7 @@ if (chatChannel) {
 
   listen("chat-reconnect", (event) => {
     if (event.payload.channel !== chatChannel) return;
-    if (!shouldUseReadonlyChat()) return;
+    if (!readonlyChatConnected) return;
     const status = event.payload.payload;
     if (status === "connecting") {
       clearChatUsers();
@@ -858,19 +878,19 @@ if (chatChannel) {
 
   listen("chat-user-join", (event) => {
     if (event.payload.channel !== chatChannel) return;
-    if (!shouldUseReadonlyChat()) return;
+    if (!readonlyChatConnected) return;
     addChatUser(event.payload.payload.username);
   });
 
   listen("chat-user-leave", (event) => {
     if (event.payload.channel !== chatChannel) return;
-    if (!shouldUseReadonlyChat()) return;
+    if (!readonlyChatConnected) return;
     removeChatUser(event.payload.payload.username);
   });
 
   listen("chat-user-bulk-add", (event) => {
     if (event.payload.channel !== chatChannel) return;
-    if (!shouldUseReadonlyChat()) return;
+    if (!readonlyChatConnected) return;
     const label = getCurrentWebviewWindow().label;
     const data = event.payload.payload;
     console.log(`[CHAT-EVENT] chat-user-bulk-add → window='${label}' count=${data.usernames?.length || 0}`);
@@ -879,7 +899,7 @@ if (chatChannel) {
 
   listen("chat-user-role", (event) => {
     if (event.payload.channel !== chatChannel) return;
-    if (!shouldUseReadonlyChat()) return;
+    if (!readonlyChatConnected) return;
     const data = event.payload.payload;
     setUserRole(data.username, data.role);
   });
@@ -1039,7 +1059,7 @@ async function handleLogin() {
 
   if (hasSession && currentChannel) {
     if (isChatNativos) {
-      if (shouldUseReadonlyChat()) {
+      if (readonlyChatConnected) {
         await disconnectReadonlyChat();
       }
       isIncognito = false;
@@ -1081,7 +1101,7 @@ async function handleLogout() {
     sessionStorage.setItem("twitch_incognito", "true");
 
     if (currentChannel) {
-      if (shouldUseReadonlyChat()) {
+      if (readonlyChatConnected) {
         await disconnectReadonlyChat();
       }
       currentChannel = "";
@@ -1229,7 +1249,7 @@ gridRefreshBtn.addEventListener("click", () => {
 });
 
 gridManualBtn.addEventListener("click", async () => {
-  if (currentChannel && shouldUseReadonlyChat()) {
+  if (readonlyChatConnected) {
     await disconnectReadonlyChat();
   }
   hideError();
@@ -1804,7 +1824,7 @@ listen("go-to-home", async () => {
   manualSeekPending = false;
   lastPlayheadPosition = null;
   goLiveBtn?.classList.add("hidden");
-  if (currentChannel && shouldUseReadonlyChat()) {
+  if (readonlyChatConnected) {
     await disconnectReadonlyChat();
   }
   destroyChatIframe();
@@ -1827,11 +1847,16 @@ listen("chat-nativos", async (event) => {
   if (currentChannel) {
     if (isChatNativos) {
       isIncognito = !isCustomSession;
-      await disconnectReadonlyChat();
+      hideReadonlyChat();
       mountChatIframe(currentChannel, isIncognito, isDarkChat);
     } else {
       isCustomSession = !isIncognito;
-      await connectReadonlyChat(currentChannel, { clearMessages: true, authType: isCustomSession ? "session" : "anonymous" });
+      destroyChatIframe();
+      if (readonlyChatConnected) {
+        showReadonlyChat();
+      } else {
+        await connectReadonlyChat(currentChannel, { clearMessages: false, authType: isCustomSession ? "session" : "anonymous" });
+      }
     }
     await updateAuthButtons();
   }
