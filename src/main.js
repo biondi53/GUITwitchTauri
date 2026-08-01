@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { runResyncTick, computeInitialCorrection } from "./live-sync.js";
+import { runResyncTick, computeInitialCorrection, updateResyncGate, LIVE_EDGE_S, RESYNC_THRESHOLD_OFFSET_S } from "./live-sync.js";
 
 const isPlayerWindow = window.location.hash.startsWith("#player/");
 const chatChannel = isPlayerWindow ? window.location.hash.slice("#player/".length) : null;
@@ -29,6 +29,7 @@ const speedSelect = document.getElementById("speed-select");
 const pipBtn = document.getElementById("pip-btn");
 const autoSpeedDisplay = document.getElementById("auto-speed-display");
 const fastForwardIndicator = document.getElementById("fast-forward-indicator");
+const goLiveBtn = document.getElementById("go-live-btn");
 const qualityLabel = document.querySelector('label[for="quality-select"]');
 const speedLabel = document.querySelector(".speed-label");
 const gridScreen = document.getElementById("grid-screen");
@@ -108,6 +109,8 @@ let stallResetTimeout = null;
 let stallResetCount = 0;
 let lastResyncAt = 0;
 let initialCorrectionDone = true;
+let manualSeekPending = false;
+let lastPlayheadPosition = null;
 const INITIAL_CORRECT_DELAY_MS = 2500;
 let nextResetTime = 0;
 let gridRefreshInterval = null;
@@ -918,6 +921,23 @@ pipBtn.addEventListener("click", () => {
   videoPlayer.requestPictureInPicture();
 });
 
+goLiveBtn?.addEventListener("click", () => {
+  if (!hls) return;
+  const details = hls.levels?.[hls.currentLevel]?.details;
+  const edge = details?.edge;
+  const target =
+    edge != null && isPositionBuffered(edge - LIVE_EDGE_S)
+      ? edge - LIVE_EDGE_S
+      : hls.liveSyncPosition;
+  if (target != null && isPositionBuffered(target)) {
+    videoPlayer.currentTime = target;
+    videoPlayer.play().catch(() => {});
+  }
+  manualSeekPending = false;
+  lastPlayheadPosition = videoPlayer.currentTime;
+  goLiveBtn?.classList.add("hidden");
+});
+
 function createChatIframe(channel, incognito, darkMode) {
   const iframe = document.createElement("iframe");
   iframe.id = "chat";
@@ -1311,6 +1331,9 @@ function startPlayback(url) {
   stallResetCount = 0;
   lastResyncAt = 0;
   initialCorrectionDone = false;
+  manualSeekPending = false;
+  lastPlayheadPosition = null;
+  goLiveBtn?.classList.add("hidden");
   livesyncInput.value = 2;
 
   if (typeof Hls !== "undefined" && Hls.isSupported()) {
@@ -1341,16 +1364,26 @@ function startPlayback(url) {
         if (hls && hls.latency != null) {
           const details = hls.levels?.[hls.currentLevel]?.details;
           const edge = details?.edge;
+          const targetLatency = hls.targetLatency ?? currentLiveSyncDuration;
+          const currentTime = videoPlayer.currentTime;
+          manualSeekPending = updateResyncGate({
+            manualSeekPending,
+            currentTime,
+            lastPosition: lastPlayheadPosition,
+            latency: hls.latency,
+            targetLatency,
+          });
           const resync = runResyncTick({
             latency: hls.latency,
-            targetLatency: hls.targetLatency ?? currentLiveSyncDuration,
+            targetLatency,
             liveSyncPosition: hls.liveSyncPosition,
-            currentTime: videoPlayer.currentTime,
+            currentTime,
             edge,
             lastResyncAt,
             now: Date.now(),
             isAuto: speedSelect.value === "auto",
             bufferCovers: isPositionBuffered,
+            manualSeekPending,
           });
           if (resync.target != null) {
             console.log("[resync]", {
@@ -1363,9 +1396,14 @@ function startPlayback(url) {
             videoPlayer.currentTime = resync.target;
             lastResyncAt = resync.lastResyncAt;
           }
+          lastPlayheadPosition = videoPlayer.currentTime;
           const displayDelay = Math.max(0, hls.latency);
           latencyDisplay.textContent = `Delay: ${displayDelay.toFixed(1)}s`;
           latencyDisplay.classList.toggle("latency-high", displayDelay > 7);
+          if (goLiveBtn) {
+            const behind = manualSeekPending && displayDelay > targetLatency + RESYNC_THRESHOLD_OFFSET_S;
+            goLiveBtn.classList.toggle("hidden", !behind);
+          }
           targetLatencyDisplay.textContent = `Target: ${hls.targetLatency?.toFixed(1) ?? "?"}s`;
           const stallCount = hls.latencyController?.stallCount;
           stallCountDisplay.textContent = stallCount != null ? `Stalls: ${stallCount}` : "";
@@ -1729,6 +1767,9 @@ listen("go-to-home", async () => {
   stopLatencyDisplay();
   videoPlayer.removeAttribute("src");
   videoPlayer.load();
+  manualSeekPending = false;
+  lastPlayheadPosition = null;
+  goLiveBtn?.classList.add("hidden");
   if (currentChannel && shouldUseReadonlyChat()) {
     await disconnectReadonlyChat();
   }

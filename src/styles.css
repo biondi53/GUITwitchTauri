@@ -359,6 +359,25 @@ body {
   min-width: 0;
 }
 
+.go-live-btn {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 4px;
+  background: #9146ff;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.go-live-btn:hover {
+  background: #a970ff;
+}
+
 .quality-bar {
   position: absolute;
   top: 12px;

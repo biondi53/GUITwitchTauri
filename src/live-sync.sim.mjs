@@ -1,4 +1,5 @@
-import { runResyncTick } from "./live-sync.js";
+import { runResyncTick, updateResyncGate } from "./live-sync.js";
+import { LIVE_EDGE_S } from "./live-sync.js";
 
 export const SIM_CFG = {
   liveSyncDuration: 2,
@@ -51,19 +52,33 @@ export function simulate({
   totalduration = 24,
   lastResyncAt = -Infinity,
   isAuto = true,
+  rewindAt,
+  rewindDelta = 0,
+  goLiveAt,
 }) {
   const state = liveState({ edge: initialEdge, age, partTarget, targetduration, totalduration });
   const bufferCovers = makeBufferCovers(state);
   const frames = [];
   let currentTime = initialCurrentTime;
+  let lastPosition = currentTime;
   let resyncAt = lastResyncAt;
+  let manualSeekPending = false;
   let virtualNow = 0;
   for (let t = 1; t <= ticks; t++) {
     state.edge += 1;
     virtualNow += 1000;
+    if (t === rewindAt) currentTime -= rewindDelta;
+    if (t === goLiveAt) currentTime = state.edge - LIVE_EDGE_S;
     const latency = hlsLatency(state, currentTime);
     const targetLatency = hlsTargetLatency(state);
     const liveSyncPosition = hlsLiveSyncPosition(state);
+    manualSeekPending = updateResyncGate({
+      manualSeekPending,
+      currentTime,
+      lastPosition,
+      latency,
+      targetLatency,
+    });
     const resync = runResyncTick({
       latency,
       targetLatency,
@@ -74,6 +89,7 @@ export function simulate({
       now: virtualNow,
       isAuto,
       bufferCovers,
+      manualSeekPending,
     });
     let action = "idle";
     if (resync.target != null) {
@@ -83,6 +99,7 @@ export function simulate({
     } else {
       currentTime += SIM_CFG.playbackRate;
     }
+    lastPosition = currentTime;
     frames.push({
       t,
       edge: state.edge,
@@ -91,6 +108,7 @@ export function simulate({
       latency,
       targetLatency,
       liveSyncPosition,
+      manualSeekPending,
       action,
     });
   }

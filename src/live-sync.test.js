@@ -6,6 +6,8 @@ import {
   computeInitialCorrection,
   computeTrueLatency,
   runResyncTick,
+  updateResyncGate,
+  USER_SEEK_BACK_THRESHOLD_S,
   RESYNC_COOLDOWN_MS,
   RESYNC_THRESHOLD_OFFSET_S,
   INITIAL_CORRECT_MARGIN_S,
@@ -356,4 +358,79 @@ test("computeTrueLatency no aplica ingesta negativa si el segmento aun no termin
     now: nowMs,
   });
   assert.equal(result, 2.3);
+});
+
+test("computeResync no busca si el usuario rebobino (manualSeekPending)", () => {
+  const result = computeResync({
+    latency: 20,
+    targetLatency: 2,
+    liveSyncPosition,
+    currentTime: 480,
+    edge: 500,
+    lastResyncAt: 0,
+    now: NOW,
+    isAuto: true,
+    bufferCovers: covers,
+    manualSeekPending: true,
+  });
+  assert.equal(result, null);
+});
+
+test("updateResyncGate detecta un rewind del usuario (seek hacia atras)", () => {
+  const result = updateResyncGate({
+    manualSeekPending: false,
+    currentTime: 480,
+    lastPosition: 500,
+    latency: 20,
+    targetLatency: 2,
+  });
+  assert.equal(result, true);
+});
+
+test("updateResyncGate ignora micro-drifs menores al umbral", () => {
+  const result = updateResyncGate({
+    manualSeekPending: false,
+    currentTime: 499.6,
+    lastPosition: 500,
+    latency: 2.4,
+    targetLatency: 2,
+  });
+  assert.equal(result, false);
+});
+
+test("updateResyncGate suelta el flag cuando el usuario alcanza el directo", () => {
+  const result = updateResyncGate({
+    manualSeekPending: true,
+    currentTime: 497,
+    lastPosition: 500,
+    latency: 3,
+    targetLatency: 2,
+  });
+  assert.equal(result, false);
+});
+
+test("updateResyncGate mantiene el flag mientras sigue atras", () => {
+  const result = updateResyncGate({
+    manualSeekPending: true,
+    currentTime: 480,
+    lastPosition: 500,
+    latency: 20,
+    targetLatency: 2,
+  });
+  assert.equal(result, true);
+});
+
+test("updateResyncGate no detecta rewind sin lastPosition (inicio)", () => {
+  const result = updateResyncGate({
+    manualSeekPending: false,
+    currentTime: 480,
+    lastPosition: null,
+    latency: 20,
+    targetLatency: 2,
+  });
+  assert.equal(result, false);
+});
+
+test("umbral USER_SEEK_BACK_THRESHOLD_S es 0.5s", () => {
+  assert.equal(USER_SEEK_BACK_THRESHOLD_S, 0.5);
 });

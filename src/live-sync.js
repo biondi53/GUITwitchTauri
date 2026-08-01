@@ -3,6 +3,7 @@ export const RESYNC_THRESHOLD_OFFSET_S = 2;
 export const INITIAL_CORRECT_MARGIN_S = 1;
 export const FORWARD_MARGIN_S = 1;
 export const LIVE_EDGE_S = 2;
+export const USER_SEEK_BACK_THRESHOLD_S = 0.5;
 
 export function computeResync({
   latency,
@@ -14,8 +15,10 @@ export function computeResync({
   now,
   isAuto,
   bufferCovers,
+  manualSeekPending = false,
 }) {
   if (!isAuto) return null;
+  if (manualSeekPending) return null;
   if (latency == null || liveSyncPosition == null) return null;
   if (latency <= targetLatency + RESYNC_THRESHOLD_OFFSET_S) return null;
   if (now - lastResyncAt < RESYNC_COOLDOWN_MS) return null;
@@ -41,6 +44,7 @@ export function runResyncTick({
   now,
   isAuto,
   bufferCovers,
+  manualSeekPending = false,
 }) {
   const resync = computeResync({
     latency,
@@ -52,11 +56,39 @@ export function runResyncTick({
     now,
     isAuto,
     bufferCovers,
+    manualSeekPending,
   });
   if (resync) {
     return { target: resync.target, lastResyncAt: now };
   }
   return { target: null, lastResyncAt };
+}
+
+export function updateResyncGate({
+  manualSeekPending,
+  currentTime,
+  lastPosition,
+  latency,
+  targetLatency,
+}) {
+  if (manualSeekPending) {
+    if (
+      latency != null &&
+      targetLatency != null &&
+      latency <= targetLatency + RESYNC_THRESHOLD_OFFSET_S
+    ) {
+      return false;
+    }
+    return true;
+  }
+  if (
+    currentTime != null &&
+    lastPosition != null &&
+    currentTime < lastPosition - USER_SEEK_BACK_THRESHOLD_S
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function computeTrueLatency({ realDelay, pdtMs, lastDur, now }) {
