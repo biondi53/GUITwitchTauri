@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { runResyncTick, computeInitialCorrection, updateResyncGate, LIVE_EDGE_S, RESYNC_THRESHOLD_OFFSET_S } from "./live-sync.js";
 import { shouldRefreshGrid, buildThumbnailUrl } from "./grid-refresh.js";
 
@@ -1790,7 +1791,19 @@ async function loadBttvGlobals() {
   }
 }
 
+async function displayAppVersion() {
+  const el = document.getElementById("app-version");
+  if (!el) return;
+  try {
+    const version = await getVersion();
+    el.textContent = `v${version}`;
+  } catch (_) {
+    el.textContent = "";
+  }
+}
+
 async function init() {
+  displayAppVersion();
   loadBttvGlobals();
 
   const [defaultIncognito, defaultDarkchat, defaultChatNativos, defaultHideTimestamps] = await Promise.all([

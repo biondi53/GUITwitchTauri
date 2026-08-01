@@ -138,6 +138,29 @@ body {
   height: auto;
 }
 
+.grid-header-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+
+.grid-header-center .twitch-logo-centered {
+  position: static;
+  transform: none;
+  width: 80px;
+  height: auto;
+}
+
+.app-version {
+  font-size: 11px;
+  color: #8a8a8e;
+  margin-top: 2px;
+}
+
 .grid-header h2 {
   font-size: 22px;
   font-weight: 600;

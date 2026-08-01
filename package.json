@@ -10,8 +10,12 @@
     "test": "node --test src/*.test.js",
     "e2e": "node tests/e2e/run-e2e.mjs",
     "tauri": "tauri",
+    "bump:patch": "node bump-version.js patch",
     "bump:minor": "node bump-version.js minor",
-    "bump:major": "node bump-version.js major"
+    "bump:major": "node bump-version.js major",
+    "release:patch": "node bump-version.js patch && npm run tauri build -- --bundles nsis",
+    "release:minor": "node bump-version.js minor && npm run tauri build -- --bundles nsis",
+    "release:major": "node bump-version.js major && npm run tauri build -- --bundles nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
