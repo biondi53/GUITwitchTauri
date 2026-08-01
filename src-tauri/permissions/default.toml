@@ -99,6 +99,11 @@ description = "Allows fetching BTTV emotes for a channel"
 commands.allow = ["fetch_bttv_emotes"]
 
 [[permission]]
+identifier = "allow-fetch-chat-history"
+description = "Allows fetching recent chat history from recent-messages service"
+commands.allow = ["fetch_chat_history"]
+
+[[permission]]
 identifier = "allow-get-native-incognito-default"
 description = "Allows reading native incognito config"
 commands.allow = ["get_native_incognito_default"]

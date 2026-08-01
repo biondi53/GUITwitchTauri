@@ -108,6 +108,8 @@ let isChatNativos = sessionStorage.getItem("twitch_chat_nativos") === "true";
 let isCustomSession = false;
 let readonlyChatConnected = false;
 let isHideTimestamps = sessionStorage.getItem("twitch_hide_timestamps") === "true";
+let renderedMessageKeys = new Set();
+let lastPrependUser = "";
 let chatLayoutMode = 0;
 let currentLiveSyncDuration = 2;
 let stallResetTimeout = null;
@@ -147,6 +149,7 @@ async function connectReadonlyChat(channel, { clearMessages = true, authType = "
     invoke("log_frontend_msg", { msg: `connectReadonlyChat channel='${channel}' authType='${authType}'` });
     if (clearMessages) {
       readonlyChatMessages.innerHTML = "";
+      renderedMessageKeys.clear();
     }
     readonlyChatMessages.classList.toggle("hide-timestamps", isHideTimestamps);
     lastMessageUser = "";
@@ -169,6 +172,7 @@ async function connectReadonlyChat(channel, { clearMessages = true, authType = "
     await invoke("connect_readonly_chat", { channel, windowLabel, authType });
     readonlyChatConnected = true;
     updateChatInputVisibility();
+    loadChatHistory(channel);
   } catch (err) {
     console.error("[CHAT] connect error:", err);
   }
@@ -179,6 +183,8 @@ async function disconnectReadonlyChat() {
     await invoke("disconnect_readonly_chat", { windowLabel: getCurrentWebviewWindow().label });
     readonlyChatConnected = false;
     readonlyChatMessages.innerHTML = "";
+    renderedMessageKeys.clear();
+    lastPrependUser = "";
     readonlyChat.classList.add("hidden");
     chatRoomState.classList.add("hidden");
     channelEmotes.clear();
@@ -198,6 +204,25 @@ async function disconnectReadonlyChat() {
   } catch (err) {
     console.error("[CHAT] disconnect error:", err);
   }
+}
+
+async function loadChatHistory(channel) {
+  if (!shouldUseReadonlyChat()) return;
+  if (chatChannel && channel !== chatChannel) return;
+  let history = [];
+  try {
+    history = await invoke("fetch_chat_history", { channel, limit: 50 });
+  } catch (err) {
+    console.error("[CHAT] history error:", err);
+    return;
+  }
+  if (chatChannel && channel !== chatChannel) return;
+  if (!readonlyChatConnected) return;
+  lastPrependUser = "";
+  for (let i = history.length - 1; i >= 0; i--) {
+    renderChatMessage(history[i], { prepend: true });
+  }
+  lastMessageUser = "";
 }
 
 function hideReadonlyChat() {
@@ -451,6 +476,22 @@ function renderChatMessage(msg, opts = {}) {
     opts.replaceNode.replaceWith(newDiv);
     return newDiv;
   }
+
+  const msgKey = `${msg.timestamp}|${msg.username}|${msg.message}`;
+
+  if (opts.prepend) {
+    if (renderedMessageKeys.has(msgKey)) return null;
+    renderedMessageKeys.add(msgKey);
+    const isGrouped = lastPrependUser === msg.username && lastPrependUser !== "";
+    lastPrependUser = msg.username || "";
+    const div = buildMessageDiv(msg, isGrouped);
+    readonlyChatMessages.insertBefore(div, readonlyChatMessages.firstChild);
+    trimMessages();
+    return div;
+  }
+
+  if (renderedMessageKeys.has(msgKey)) return null;
+  renderedMessageKeys.add(msgKey);
 
   const isGrouped = lastMessageUser === msg.username && lastMessageUser !== "";
   lastMessageUser = msg.username || "";

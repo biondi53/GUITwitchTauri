@@ -207,6 +207,12 @@
           "markdownDescription": "Allows fetching channel emotes from Helix"
         },
         {
+          "description": "Allows fetching recent chat history from recent-messages service",
+          "type": "string",
+          "const": "allow-fetch-chat-history",
+          "markdownDescription": "Allows fetching recent chat history from recent-messages service"
+        },
+        {
           "description": "Allows fetching followed streams",
           "type": "string",
           "const": "allow-fetch-followed-streams",

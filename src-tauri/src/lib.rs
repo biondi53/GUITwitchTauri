@@ -1998,6 +1998,71 @@ async fn fetch_bttv_emotes(channel_id: Option<String>) -> Result<serde_json::Val
 }
 
 #[tauri::command]
+async fn fetch_chat_history(channel: String, limit: Option<u32>) -> Vec<ChatMessage> {
+    log_to_file(&format!("[RM] fetch_chat_history(\"{}\") called", channel));
+    let limit = limit.unwrap_or(50).clamp(1, 800);
+    let url = format!(
+        "https://recent-messages.robotty.de/api/v2/recent-messages/{}?limit={}",
+        channel, limit
+    );
+
+    #[derive(serde::Deserialize)]
+    struct RecentMessagesResponse {
+        messages: Vec<String>,
+        error_code: Option<String>,
+    }
+
+    let client = reqwest::Client::new();
+    let resp = match client
+        .get(&url)
+        .header("User-Agent", "GUITwitchTauri/1.0")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log_to_file(&format!("[RM] fetch_chat_history error: {}", e));
+            return Vec::new();
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        log_to_file(&format!("[RM] fetch_chat_history FAILED: {}", status));
+        return Vec::new();
+    }
+
+    let body: RecentMessagesResponse = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            log_to_file(&format!("[RM] fetch_chat_history parse error: {}", e));
+            return Vec::new();
+        }
+    };
+
+    if let Some(err) = &body.error_code {
+        log_to_file(&format!("[RM] fetch_chat_history error_code={}", err));
+    }
+
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    for line in &body.messages {
+        if !line.contains("PRIVMSG") {
+            continue;
+        }
+        if let Some(msg) = parse_irc_message(line) {
+            if msg.timestamp > 0 {
+                messages.push(msg);
+            }
+        }
+    }
+
+    messages.sort_by_key(|m| m.timestamp);
+    log_to_file(&format!("[RM] fetch_chat_history OK → {} messages", messages.len()));
+    messages
+}
+
+#[tauri::command]
 fn set_menu_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
@@ -2104,6 +2169,7 @@ pub fn run() {
             fetch_chat_emotes,
             fetch_chat_badges,
             fetch_bttv_emotes,
+            fetch_chat_history,
             save_session_from_cookies,
             save_username_from_token,
             get_twitch_username
