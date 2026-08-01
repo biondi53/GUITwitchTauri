@@ -1,6 +1,6 @@
 # Twitch Ultralight
 
-Cliente de escritorio ultraligero para ver streams de Twitch y usar el chat, construido con Tauri 2 + Vanilla JS. Alternativa liviana al cliente oficial de escritorio.
+Cliente de escritorio ultraligero para ver streams de Twitch y usar el chat, construido con Tauri 2 + Vanilla JS.
 
 ## Características
 
@@ -9,7 +9,6 @@ Cliente de escritorio ultraligero para ver streams de Twitch y usar el chat, con
 - Chat IRC integrado con historial, emblemas y colores de usuario.
 - Posición del chat configurable (derecha, izquierda u oculto).
 - Login OAuth con Twitch para chat y suscripciones.
-- Sin base de datos: los tokens se guardan localmente en tu perfil de usuario.
 
 ## Requisitos
 
@@ -35,22 +34,6 @@ npm run tauri dev
 | `npm run bump:patch` / `bump:minor` / `bump:major` | Incrementar versión y crear tag git `vX.Y.Z` |
 | `npm run release:patch` / `release:minor` / `release:major` | Release completo: bump + compilar instalador + push + crear GitHub Release borrador |
 
-## Versionado
-
-La versión tiene una única fuente de verdad (`src-tauri/tauri.conf.json`) y `bump-version.js` la propaga a todos los archivos (`package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock`) creando un commit y un tag `vX.Y.Z`.
-
-## Release de punta a punta
-
-```bash
-npm run release:patch   # o release:minor / release:major
-```
-
-Este comando ejecuta en orden: verificación del working tree limpio → bump de versión (commit + tag) → compilación del instalador NSIS → push del commit y del tag → creación de un **GitHub Release borrador** (para revisar antes de publicar).
-
-- `npm run release:patch -- --dry-run` muestra la secuencia sin ejecutar nada.
-- Tras el comando, revisa el borrador en GitHub (`gh release view vX.Y.Z`) y publícalo.
-
-> Requisitos: `gh` autenticado y working tree sin cambios sin commitear.
 
 ## Build de instalador
 
