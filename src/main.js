@@ -925,11 +925,8 @@ goLiveBtn?.addEventListener("click", () => {
   if (!hls) return;
   const details = hls.levels?.[hls.currentLevel]?.details;
   const edge = details?.edge;
-  const target =
-    edge != null && isPositionBuffered(edge - LIVE_EDGE_S)
-      ? edge - LIVE_EDGE_S
-      : hls.liveSyncPosition;
-  if (target != null && isPositionBuffered(target)) {
+  const target = edge != null ? edge - LIVE_EDGE_S : hls.liveSyncPosition;
+  if (target != null) {
     videoPlayer.currentTime = target;
     videoPlayer.play().catch(() => {});
   }
