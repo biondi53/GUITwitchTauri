@@ -14,12 +14,13 @@ const MIME = {
   ".json": "application/json; charset=utf-8",
 };
 
+const CHANNEL = process.env.E2E_CHANNEL || "argentumunitedtv";
 let cachedCdnUrl = null;
 
 function getCdnUrl() {
   if (cachedCdnUrl) return cachedCdnUrl;
   const args = [
-    "twitch.tv/argentumunitedtv",
+    `twitch.tv/${CHANNEL}`,
     "--json",
     "--twitch-supported-codecs",
     "h264,h265,av1",

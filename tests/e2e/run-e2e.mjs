@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
 
 const PORT = 8642;
-const DURATION_MS = 150000;
+const DURATION_MS = Number(process.env.E2E_DURATION_MS || 150000);
 const SETTLE_S = 60;
 
 const server = spawn(process.execPath, ["tests/e2e/server.mjs"], {
@@ -50,11 +50,14 @@ try {
   const maxDelay = Math.max(...realDelays, 0);
   const hlsLatencies = late.map((t) => t.hlsLatency).filter((v) => v != null);
   const maxHlsLatency = Math.max(...hlsLatencies, 0);
+  const pdtLatencies = late.map((t) => t.pdtLatency).filter((v) => v != null);
+  const maxPdtLatency = Math.max(...pdtLatencies, 0);
   const stalled = late.filter((t) => t.stalled).length;
   const actions = late.map((t) => t.action);
   const seeksLate = actions.filter((a) => a !== "idle");
 
   console.log("=== E2E RESULT ===");
+  console.log("canal:", process.env.E2E_CHANNEL || "argentumunitedtv");
   console.log("frames totales:", telemetry.length, "| frames ultimos 60s:", late.length);
   console.log("backward seeks (todos):", backward.length);
   console.log("seeks en ultimos 60s:", seeksLate.length);
@@ -62,6 +65,8 @@ try {
   console.log("realDelay max (ult 60s):", maxDelay.toFixed(2), "s");
   console.log("hlsLatency mediana (ult 60s):", median(hlsLatencies).toFixed(2), "s");
   console.log("hlsLatency max (ult 60s):", maxHlsLatency.toFixed(2), "s");
+  console.log("pdtLatency mediana (ult 60s):", median(pdtLatencies).toFixed(2), "s");
+  console.log("pdtLatency max (ult 60s):", maxPdtLatency.toFixed(2), "s");
   console.log("stalls (ult 60s):", stalled);
   console.log("console msg:", consoleMsgs.length);
 

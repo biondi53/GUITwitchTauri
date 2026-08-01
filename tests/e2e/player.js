@@ -1,4 +1,4 @@
-import { runResyncTick } from "/src/live-sync.js";
+import { runResyncTick, computeTrueLatency } from "/src/live-sync.js";
 
 const video = document.getElementById("v");
 const statusEl = document.getElementById("status");
@@ -60,7 +60,14 @@ async function main() {
       lastResyncAt = resync.lastResyncAt;
     }
     const realDelay = edge != null ? Math.max(0, edge - currentTime) : null;
-    if (lastTick != null && currentTime - lastTick < 0.01) {
+    const frags = details?.fragments;
+    const lastFrag = frags?.[frags.length - 1];
+    const pdtLatency = computeTrueLatency({
+      realDelay,
+      pdtMs: lastFrag?.programDateTime ?? null,
+      lastDur: lastFrag?.duration,
+      now: Date.now(),
+    });    if (lastTick != null && currentTime - lastTick < 0.01) {
       stalledSince = stalledSince ?? Date.now();
     } else {
       stalledSince = null;
@@ -71,6 +78,7 @@ async function main() {
       currentTime: +currentTime.toFixed(3),
       edge: edge != null ? +edge.toFixed(3) : null,
       hlsLatency: hls.latency ? +hls.latency.toFixed(3) : null,
+      pdtLatency: pdtLatency != null ? +pdtLatency.toFixed(3) : null,
       liveSyncPosition: hls.liveSyncPosition != null ? +hls.liveSyncPosition.toFixed(3) : null,
       action,
       realDelay: realDelay != null ? +realDelay.toFixed(3) : null,
@@ -78,7 +86,7 @@ async function main() {
       stalled: stalledSince != null,
       readyState: video.readyState,
     });
-    statusEl.textContent = `t=${telemetry.length} delay=${realDelay?.toFixed(1)}s hls=${hls.latency?.toFixed(1)}s action=${action} playing=${!video.paused}`;
+    statusEl.textContent = `t=${telemetry.length} delay=${realDelay?.toFixed(1)}s hls=${hls.latency?.toFixed(1)}s pdt=${pdtLatency?.toFixed(1)}s action=${action} playing=${!video.paused}`;
   }, 1000);
 }
 

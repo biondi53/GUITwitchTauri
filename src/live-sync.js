@@ -59,6 +59,13 @@ export function runResyncTick({
   return { target: null, lastResyncAt };
 }
 
+export function computeTrueLatency({ realDelay, pdtMs, lastDur, now }) {
+  if (realDelay == null || pdtMs == null) return null;
+  const segEndS = pdtMs / 1000 + (lastDur ?? 0);
+  const ingest = Math.max(0, now / 1000 - segEndS);
+  return realDelay + ingest;
+}
+
 export function computeInitialCorrection({
   currentTime,
   liveSyncPosition,

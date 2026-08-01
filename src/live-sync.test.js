@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   computeResync,
   computeInitialCorrection,
+  computeTrueLatency,
   runResyncTick,
   RESYNC_COOLDOWN_MS,
   RESYNC_THRESHOLD_OFFSET_S,
@@ -309,4 +310,50 @@ test("runResyncTick devuelve target null y conserva lastResyncAt sin resync", ()
     bufferCovers: covers,
   });
   assert.deepEqual(result, { target: null, lastResyncAt: 0 });
+});
+
+test("computeTrueLatency con ingesta 0 devuelve el realDelay (captura al dia)", () => {
+  const nowMs = 100_000;
+  const lastDur = 2;
+  const result = computeTrueLatency({
+    realDelay: 2.3,
+    pdtMs: nowMs - lastDur * 1000,
+    lastDur,
+    now: nowMs,
+  });
+  assert.equal(result, 2.3);
+});
+
+test("computeTrueLatency suma la ingesta del canal (buffer de servidor)", () => {
+  const nowMs = 100_000;
+  const lastDur = 2;
+  const result = computeTrueLatency({
+    realDelay: 2.3,
+    pdtMs: nowMs - (lastDur + 5) * 1000,
+    lastDur,
+    now: nowMs,
+  });
+  assert.equal(result, 2.3 + 5);
+});
+
+test("computeTrueLatency devuelve null si no hay pdtMs (fallback)", () => {
+  const result = computeTrueLatency({
+    realDelay: 2.3,
+    pdtMs: null,
+    lastDur: 2,
+    now: 100_000,
+  });
+  assert.equal(result, null);
+});
+
+test("computeTrueLatency no aplica ingesta negativa si el segmento aun no termino", () => {
+  const nowMs = 100_000;
+  const lastDur = 2;
+  const result = computeTrueLatency({
+    realDelay: 2.3,
+    pdtMs: nowMs + 3 * 1000,
+    lastDur,
+    now: nowMs,
+  });
+  assert.equal(result, 2.3);
 });
