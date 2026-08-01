@@ -348,11 +348,27 @@ body {
 /* ---- Stream Layout ---- */
 .stream-layout {
   display: grid;
+  grid-template-areas: "video chat";
   grid-template-columns: 3fr 1fr;
   height: 100vh;
 }
 
+.stream-layout.chat-left {
+  grid-template-areas: "chat video";
+  grid-template-columns: 1fr 3fr;
+}
+
+.stream-layout.chat-hidden {
+  grid-template-areas: "video";
+  grid-template-columns: 1fr;
+}
+
+.stream-layout.chat-hidden .chat-container {
+  display: none;
+}
+
 .video-container {
+  grid-area: video;
   position: relative;
   background: #000;
   overflow: hidden;
@@ -467,6 +483,12 @@ body {
   border-color: #9147ff;
 }
 
+#chat-toggle-btn.active {
+  border-color: #9147ff;
+  background: #3a2a55;
+  color: #bf94ff;
+}
+
 
 
 .latency-high {
@@ -507,6 +529,7 @@ body {
 }
 
 .chat-container {
+  grid-area: chat;
   background: #18181b;
   overflow: hidden;
   min-width: 0;

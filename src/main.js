@@ -29,6 +29,7 @@ const stallCountDisplay = document.getElementById("stall-count-display");
 const resetInfoDisplay = document.getElementById("reset-info-display");
 const speedSelect = document.getElementById("speed-select");
 const pipBtn = document.getElementById("pip-btn");
+const chatToggleBtn = document.getElementById("chat-toggle-btn");
 const autoSpeedDisplay = document.getElementById("auto-speed-display");
 const goLiveBtn = document.getElementById("go-live-btn");
 const qualityLabel = document.querySelector('label[for="quality-select"]');
@@ -106,6 +107,7 @@ let isDarkChat = sessionStorage.getItem("twitch_darkchat") === "true";
 let isChatNativos = sessionStorage.getItem("twitch_chat_nativos") === "true";
 let isCustomSession = false;
 let isHideTimestamps = sessionStorage.getItem("twitch_hide_timestamps") === "true";
+let chatLayoutMode = 0;
 let currentLiveSyncDuration = 2;
 let stallResetTimeout = null;
 let stallResetCount = 0;
@@ -911,6 +913,17 @@ livesyncInput.addEventListener("change", () => {
 
 pipBtn.addEventListener("click", () => {
   videoPlayer.requestPictureInPicture();
+});
+
+chatToggleBtn?.addEventListener("click", () => {
+  chatLayoutMode = (chatLayoutMode + 1) % 3;
+  streamLayout.classList.remove("chat-left", "chat-hidden");
+  if (chatLayoutMode === 1) {
+    streamLayout.classList.add("chat-left");
+  } else if (chatLayoutMode === 2) {
+    streamLayout.classList.add("chat-hidden");
+  }
+  chatToggleBtn.classList.toggle("active", chatLayoutMode !== 0);
 });
 
 goLiveBtn?.addEventListener("click", () => {
