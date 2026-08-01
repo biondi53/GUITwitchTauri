@@ -323,26 +323,17 @@ function getEmoteUrl(emoteId, name) {
   return `https://static-cdn.jtvnw.net/emoticons/v2/${emoteId}/default/dark/2.0`;
 }
 
-function renderChatMessage(msg) {
-  if (!shouldUseReadonlyChat()) return;
-  if (msg.username) addChatUser(msg.username);
-
+function buildMessageDiv(msg, isGrouped) {
   const div = document.createElement("div");
   div.className = "chat-msg";
-
-  if (msg.system_type) {
-    renderSystemMessage(div, msg);
-    readonlyChatMessages.appendChild(div);
-    trimMessages();
-    return;
-  }
 
   if (msg.bits && parseInt(msg.bits) > 0) {
     div.classList.add("bits-msg");
   }
 
-  const isGrouped = lastMessageUser === msg.username && lastMessageUser !== "";
-  lastMessageUser = msg.username || "";
+  if (isGrouped) {
+    div.classList.add("grouped");
+  }
 
   const timeSpan = document.createElement("span");
   timeSpan.className = "chat-msg-time timestamp";
@@ -351,10 +342,6 @@ function renderChatMessage(msg) {
     timeSpan.textContent = ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
   div.appendChild(timeSpan);
-
-  if (isGrouped) {
-    div.classList.add("grouped");
-  }
 
   if (msg.badges && msg.badges.length > 0) {
     msg.badges.forEach((badge) => {
@@ -422,6 +409,33 @@ function renderChatMessage(msg) {
     div.appendChild(bitsSpan);
   }
 
+  return div;
+}
+
+function renderChatMessage(msg, opts = {}) {
+  if (!shouldUseReadonlyChat()) return null;
+  if (msg.username) addChatUser(msg.username);
+
+  if (msg.system_type) {
+    const div = document.createElement("div");
+    div.className = "chat-msg";
+    renderSystemMessage(div, msg);
+    readonlyChatMessages.appendChild(div);
+    trimMessages();
+    return null;
+  }
+
+  if (opts.replaceNode && opts.replaceNode.isConnected) {
+    const isGrouped = opts.replaceNode.classList.contains("grouped");
+    const newDiv = buildMessageDiv(msg, isGrouped);
+    opts.replaceNode.replaceWith(newDiv);
+    return newDiv;
+  }
+
+  const isGrouped = lastMessageUser === msg.username && lastMessageUser !== "";
+  lastMessageUser = msg.username || "";
+
+  const div = buildMessageDiv(msg, isGrouped);
   readonlyChatMessages.appendChild(div);
   trimMessages();
 
@@ -432,6 +446,8 @@ function renderChatMessage(msg) {
     newMessagesBtn.textContent = `${pendingMessages} nuevo${pendingMessages !== 1 ? "s" : ""} mensaje${pendingMessages !== 1 ? "s" : ""}`;
     newMessagesBtn.classList.remove("hidden");
   }
+
+  return div;
 }
 
 function renderSystemMessage(div, msg) {
@@ -768,9 +784,13 @@ if (chatChannel) {
       const incomingText = (data.message || "").trim().toLowerCase();
       const matchIdx = pendingLocalMessages.findIndex(m => m.text === incomingText);
       if (matchIdx !== -1) {
+        const entry = pendingLocalMessages[matchIdx];
         pendingLocalMessages.splice(matchIdx, 1);
         pendingLocalEchoes = pendingLocalMessages.length;
-        return;
+        if (entry.node && entry.node.isConnected) {
+          renderChatMessage(data, { replaceNode: entry.node });
+          return;
+        }
       }
     }
 
@@ -1146,26 +1166,26 @@ function setupChatInput() {
     }
     invoke("log_frontend_msg", { msg: `send: channel='${currentChannel}' msg='${msg}'` });
     try {
-      await invoke("send_chat_message", {
+      const us = await invoke("send_chat_message", {
         channel: currentChannel,
         message: msg,
         windowLabel: getCurrentWebviewWindow().label,
       });
       if (myTwitchUsername) {
-        pendingLocalMessages.push({ text: msg.trim().toLowerCase(), ts: Date.now() });
-        pendingLocalEchoes = pendingLocalMessages.length;
-        renderChatMessage({
+        const node = renderChatMessage({
           username: myTwitchUsername,
-          display_name: myTwitchUsername,
-          color: "#9147FF",
+          display_name: us?.display_name || myTwitchUsername,
+          color: us?.color || "#9147FF",
           message: msg,
           emotes: [],
-          badges: [],
+          badges: us?.badges || [],
           timestamp: Date.now(),
           bits: null,
           subscriber: false,
           is_action: false,
         });
+        pendingLocalMessages.push({ text: msg.trim().toLowerCase(), ts: Date.now(), node });
+        pendingLocalEchoes = pendingLocalMessages.length;
       }
       input.value = "";
       invoke("log_frontend_msg", { msg: "send OK" });

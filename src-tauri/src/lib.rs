@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,6 +31,8 @@ struct ChatConnection {
     connected: AtomicBool,
     stop_requested: AtomicBool,
     connection_id: AtomicU64,
+    sent_messages: Mutex<VecDeque<(u64, String)>>,
+    user_state: Mutex<Option<UserState>>,
 }
 
 struct ChatState {
@@ -1000,6 +1002,13 @@ struct RoomState {
     followers_only: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct UserState {
+    display_name: String,
+    color: String,
+    badges: Vec<BadgeInfo>,
+}
+
 fn parse_irc_tags(tag_str: &str) -> HashMap<String, String> {
     let mut tags = HashMap::new();
     for part in tag_str.split(';') {
@@ -1224,6 +1233,36 @@ fn parse_roomstate(raw: &str) -> Option<RoomState> {
     })
 }
 
+fn parse_userstate(raw: &str) -> Option<UserState> {
+    let raw = raw.trim();
+    if !raw.starts_with('@') {
+        return None;
+    }
+    if !raw.contains(" USERSTATE ") && !raw.contains(" GLOBALUSERSTATE ") {
+        return None;
+    }
+
+    let (tags_str, _rest) = raw[1..].split_once(' ')?;
+    let tags = parse_irc_tags(tags_str);
+
+    let display_name = tags.get("display-name").cloned().unwrap_or_default();
+    let color = tags.get("color").cloned().unwrap_or_default();
+    let badges_str = tags.get("badges").cloned().unwrap_or_default();
+    let badges: Vec<BadgeInfo> = if badges_str.is_empty() {
+        Vec::new()
+    } else {
+        badges_str.split(',').filter(|b| !b.is_empty()).map(|b| {
+            let parts: Vec<&str> = b.split('/').collect();
+            BadgeInfo {
+                name: parts.get(0).unwrap_or(&"").to_string(),
+                version: parts.get(1).unwrap_or(&"1").to_string(),
+            }
+        }).collect()
+    };
+
+    Some(UserState { display_name, color, badges })
+}
+
 fn parse_membership_event(raw: &str) -> Option<(String, String)> {
     let raw = raw.trim();
     let raw_stripped = if raw.starts_with('@') {
@@ -1326,6 +1365,8 @@ async fn connect_readonly_chat(
             connected: AtomicBool::new(false),
             stop_requested: AtomicBool::new(false),
             connection_id: AtomicU64::new(0),
+            sent_messages: Mutex::new(VecDeque::new()),
+            user_state: Mutex::new(None),
         });
         let mut conns = chat_state.connections.write().await;
         conns.insert(window_label.clone(), conn.clone());
@@ -1385,9 +1426,9 @@ async fn connect_readonly_chat(
 
             let (mut write, mut read) = ws_stream.split();
 
-            log_to_file("[CHAT-IRC] → CAP REQ :twitch.tv/membership");
+            log_to_file("[CHAT-IRC] → CAP REQ :twitch.tv/membership twitch.tv/tags twitch.tv/commands");
             if write.send(tokio_tungstenite::tungstenite::Message::Text(
-                "CAP REQ :twitch.tv/membership".into(),
+                "CAP REQ :twitch.tv/membership twitch.tv/tags twitch.tv/commands".into(),
             )).await.is_err() { continue; }
 
             log_to_file("[CHAT-IRC] Esperando CAP ACK...");
@@ -1475,6 +1516,13 @@ async fn connect_readonly_chat(
                             log_to_file(&format!("[CHAT-IRC] ← CAP ACK: {}", text_str));
                         }
 
+                        if let Some(us) = parse_userstate(text_str) {
+                            let badge_names: Vec<String> = us.badges.iter().map(|b| b.name.clone()).collect();
+                            log_to_file(&format!("[USERSTATE] display='{}' color='{}' badges={:?}", us.display_name, us.color, badge_names));
+                            *connection.user_state.lock().await = Some(us);
+                            continue;
+                        }
+
                         if text_str.contains("Login unsuccessful") || text_str.contains("Login authentication failed") {
                             log_to_file(&format!("[CHAT-AUTH] Token inválido detectado: {}", &text_str[..text_str.len().min(200)]));
                             let _ = std::fs::remove_file(token_path());
@@ -1545,6 +1593,21 @@ async fn connect_readonly_chat(
                         }
 
                         if let Some(msg) = parse_irc_message(text_str) {
+                            let badge_names: Vec<&str> = msg.badges.iter().map(|b| b.name.as_str()).collect();
+                            log_to_file(&format!(
+                                "[PRIVMSG] user='{}' display='{}' text='{}' color='{}' badges={:?} emotes={}",
+                                msg.username, msg.display_name, msg.message, msg.color, badge_names, msg.emotes.len()
+                            ));
+                            let incoming_lower = msg.message.trim().to_lowercase();
+                            if !incoming_lower.is_empty() {
+                                let echo_match = connection.sent_messages.lock().await.iter().any(|(_, t)| t == &incoming_lower);
+                                if echo_match {
+                                    log_to_file(&format!(
+                                        "[ECHO-MATCH] mensaje propio recibido: user='{}' display='{}' text='{}' color='{}' badges={:?}",
+                                        msg.username, msg.display_name, msg.message, msg.color, badge_names
+                                    ));
+                                }
+                            }
                             let role = if msg.badges.iter().any(|b| b.name == "broadcaster") {
                                 "broadcaster"
                             } else if msg.badges.iter().any(|b| b.name == "moderator") {
@@ -1644,7 +1707,7 @@ async fn send_chat_message(
     channel: String,
     message: String,
     window_label: String,
-) -> Result<(), String> {
+) -> Result<Option<UserState>, String> {
     use futures_util::SinkExt;
 
     debug_chat(&format!("send_chat_message channel='{}' label='{}' msg='{}'", channel, window_label, message));
@@ -1680,7 +1743,19 @@ async fn send_chat_message(
     match sender.send(tokio_tungstenite::tungstenite::Message::Text(irc_msg.into())).await {
         Ok(()) => {
             debug_chat(&format!("send_chat_message: PRIVMSG sent OK"));
-            Ok(())
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let mut sent = connection.sent_messages.lock().await;
+            sent.push_back((now_ms, message.trim().to_lowercase()));
+            while sent.len() > 20 {
+                sent.pop_front();
+            }
+            drop(sent);
+            let us = connection.user_state.lock().await.clone();
+            debug_chat(&format!("send_chat_message: user_state available={}", us.is_some()));
+            Ok(us)
         }
         Err(e) => {
             debug_chat(&format!("send_chat_message: send ERROR '{}'", e));
