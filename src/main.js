@@ -28,7 +28,6 @@ const resetInfoDisplay = document.getElementById("reset-info-display");
 const speedSelect = document.getElementById("speed-select");
 const pipBtn = document.getElementById("pip-btn");
 const autoSpeedDisplay = document.getElementById("auto-speed-display");
-const fastForwardIndicator = document.getElementById("fast-forward-indicator");
 const goLiveBtn = document.getElementById("go-live-btn");
 const qualityLabel = document.querySelector('label[for="quality-select"]');
 const speedLabel = document.querySelector(".speed-label");
@@ -874,22 +873,13 @@ videoPlayer.addEventListener("waiting", () => {
   if (speedSelect.value !== "auto" && videoPlayer.playbackRate > 1) {
     videoPlayer.playbackRate = 1;
   }
-  if (speedSelect.value === "auto" && videoPlayer.playbackRate <= 1) {
-    fastForwardIndicator.classList.add("hidden");
-  }
 });
 
 videoPlayer.addEventListener("ratechange", () => {
   if (speedSelect.value === "auto") {
     autoSpeedDisplay.textContent = `x${videoPlayer.playbackRate.toFixed(2)}`;
-    if (videoPlayer.playbackRate > 1.0) {
-      fastForwardIndicator.classList.remove("hidden");
-    } else {
-      fastForwardIndicator.classList.add("hidden");
-    }
   } else {
     autoSpeedDisplay.textContent = "";
-    fastForwardIndicator.classList.add("hidden");
     syncSpeedSelect();
   }
 });
@@ -898,12 +888,10 @@ speedSelect.addEventListener("change", () => {
   if (speedSelect.value === "auto") {
     if (hls) hls.config.maxLiveSyncPlaybackRate = 1.05;
     autoSpeedDisplay.textContent = "";
-    fastForwardIndicator.classList.add("hidden");
   } else {
     if (hls) hls.config.maxLiveSyncPlaybackRate = 1;
     videoPlayer.playbackRate = parseFloat(speedSelect.value);
     autoSpeedDisplay.textContent = "";
-    fastForwardIndicator.classList.add("hidden");
     currentLiveSyncDuration = 2;
     livesyncInput.value = 2;
     if (hls) hls.targetLatency = 2;
