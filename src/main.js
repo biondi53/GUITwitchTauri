@@ -294,6 +294,7 @@ async function fetchChannelEmotesAndBadges(channel) {
       });
     }
 
+    refreshRenderedBadges();
     await fetchBttvEmotes(channelId);
 
   } catch (err) {
@@ -362,6 +363,14 @@ function getBadgeUrl(badgeName, badgeVersion) {
   return null;
 }
 
+function refreshRenderedBadges() {
+  for (const div of readonlyChatMessages.children) {
+    if (!div.__msg) continue;
+    const newDiv = buildMessageDiv(div.__msg, div.classList.contains("grouped"));
+    div.replaceWith(newDiv);
+  }
+}
+
 function getEmoteUrl(emoteId, name) {
   const channelEmote = channelEmotes.get(name);
   if (channelEmote) return channelEmote.url4 || channelEmote.url2 || channelEmote.url1;
@@ -371,6 +380,7 @@ function getEmoteUrl(emoteId, name) {
 function buildMessageDiv(msg, isGrouped) {
   const div = document.createElement("div");
   div.className = "chat-msg";
+  div.__msg = msg;
 
   if (msg.bits && parseInt(msg.bits) > 0) {
     div.classList.add("bits-msg");
