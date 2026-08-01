@@ -13,9 +13,9 @@
     "bump:patch": "node bump-version.js patch",
     "bump:minor": "node bump-version.js minor",
     "bump:major": "node bump-version.js major",
-    "release:patch": "node bump-version.js patch && npm run tauri build -- --bundles nsis",
-    "release:minor": "node bump-version.js minor && npm run tauri build -- --bundles nsis",
-    "release:major": "node bump-version.js major && npm run tauri build -- --bundles nsis"
+    "release:patch": "node release.js patch",
+    "release:minor": "node release.js minor",
+    "release:major": "node release.js major"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"

@@ -33,11 +33,24 @@ npm run tauri dev
 | `npm run e2e` | Tests end-to-end con Playwright |
 | `npm run tauri dev` | Aplicación de escritorio en modo dev |
 | `npm run bump:patch` / `bump:minor` / `bump:major` | Incrementar versión y crear tag git `vX.Y.Z` |
-| `npm run release:patch` / `release:minor` / `release:major` | Incrementar versión + compilar instalador NSIS |
+| `npm run release:patch` / `release:minor` / `release:major` | Release completo: bump + compilar instalador + push + crear GitHub Release borrador |
 
 ## Versionado
 
 La versión tiene una única fuente de verdad (`src-tauri/tauri.conf.json`) y `bump-version.js` la propaga a todos los archivos (`package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock`) creando un commit y un tag `vX.Y.Z`.
+
+## Release de punta a punta
+
+```bash
+npm run release:patch   # o release:minor / release:major
+```
+
+Este comando ejecuta en orden: verificación del working tree limpio → bump de versión (commit + tag) → compilación del instalador NSIS → push del commit y del tag → creación de un **GitHub Release borrador** (para revisar antes de publicar).
+
+- `npm run release:patch -- --dry-run` muestra la secuencia sin ejecutar nada.
+- Tras el comando, revisa el borrador en GitHub (`gh release view vX.Y.Z`) y publícalo.
+
+> Requisitos: `gh` autenticado y working tree sin cambios sin commitear.
 
 ## Build de instalador
 
