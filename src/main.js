@@ -1339,7 +1339,7 @@ function startPlayback(url) {
   if (typeof Hls !== "undefined" && Hls.isSupported()) {
     hls = new Hls({
       liveSyncDuration: currentLiveSyncDuration,
-      liveMaxLatencyDuration: 3.5,
+      liveMaxLatencyDuration: 3600,
       maxBufferLength: 5,
       maxMaxBufferLength: 15,
       backBufferLength: 0,
