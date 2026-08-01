@@ -896,7 +896,7 @@ videoPlayer.addEventListener("ratechange", () => {
 
 speedSelect.addEventListener("change", () => {
   if (speedSelect.value === "auto") {
-    if (hls) hls.config.maxLiveSyncPlaybackRate = 1.25;
+    if (hls) hls.config.maxLiveSyncPlaybackRate = 1.05;
     autoSpeedDisplay.textContent = "";
     fastForwardIndicator.classList.add("hidden");
   } else {
@@ -1341,7 +1341,7 @@ function startPlayback(url) {
       maxMaxBufferLength: 15,
       backBufferLength: 0,
       lowLatencyMode: true,
-      maxLiveSyncPlaybackRate: 1.25,
+      maxLiveSyncPlaybackRate: 1.05,
       liveSyncOnStallIncrease: 0,
     });
     speedSelect.value = "auto";
