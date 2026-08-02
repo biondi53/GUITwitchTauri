@@ -1,7 +1,7 @@
-PackageIdentifier: TwitchUltraligero.TwitchUltralight
-PackageVersion: 1.1.59
+PackageIdentifier: biondi53.TwitchUltralight
+PackageVersion: 1.1.60
 PackageLocale: en-US
-Publisher: twitchultraligero
+Publisher: biondi53
 PackageName: Twitch Ultralight
 PackageUrl: https://github.com/biondi53/GUITwitchTauri
 License: Freeware

@@ -7,7 +7,7 @@ Cliente de escritorio ultraligero para ver streams de Twitch y usar el chat, con
 La forma recomendada de instalar la aplicación es con winget:
 
 ```powershell
-winget install --id TwitchUltraligero.TwitchUltralight
+winget install --id biondi53.TwitchUltralight
 ```
 
 ## Características
