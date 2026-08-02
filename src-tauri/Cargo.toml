@@ -1,6 +1,6 @@
 [package]
 name = "twitch-ultra-ligero"
-version = "1.1.57"
+version = "1.1.58"
 description = "Twitch Ultra-Ligero Desktop Player"
 authors = ["you"]
 edition = "2021"
