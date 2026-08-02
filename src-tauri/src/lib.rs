@@ -154,18 +154,22 @@ const BROWSER_UA: &str =
 async fn list_streams(app: tauri::AppHandle, channel: &str) -> Result<Vec<StreamInfo>, String> {
     let (sig, token) = playback_access_token(&app, channel).await?;
 
+    let p_random = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() % 999_999)
+        .unwrap_or(0))
+    .to_string();
+
     let master_url = reqwest::Url::parse_with_params(
-        &format!("https://usher.ttvnw.net/api/channel/hls/{}.m3u8", channel),
+        &format!("https://usher.ttvnw.net/api/v2/channel/hls/{}.m3u8", channel),
         &[
+            ("platform", "web"),
+            ("p", &p_random),
             ("allow_source", "true"),
             ("allow_audio_only", "true"),
-            ("allow_spectre", "true"),
-            ("fast_bread", "true"),
             ("playlist_include_framerate", "true"),
-            ("reassignments_supported", "true"),
-            ("supported_codecs", "avc1,hvc1,av01"),
-            ("p", TWITCH_PUBLIC_CLIENT_ID),
-            ("player", "twitchweb"),
+            ("supported_codecs", "h264,h265,av1"),
+            ("fast_bread", "true"),
             ("sig", &sig),
             ("token", &token),
         ],
@@ -175,6 +179,8 @@ async fn list_streams(app: tauri::AppHandle, channel: &str) -> Result<Vec<Stream
     let resp = reqwest::Client::new()
         .get(master_url.clone())
         .header("User-Agent", BROWSER_UA)
+        .header("Referer", "https://player.twitch.tv")
+        .header("Origin", "https://player.twitch.tv")
         .send()
         .await
         .map_err(|e| format!("Error consultando el CDN de Twitch: {}", e))?;
@@ -194,6 +200,9 @@ async fn list_streams(app: tauri::AppHandle, channel: &str) -> Result<Vec<Stream
         kb.cmp(&ka)
     });
 
+    let names: Vec<&str> = streams.iter().map(|s| s.name.as_str()).collect();
+    log_to_file(&format!("[STREAMS] {} -> {}", channel, names.join(", ")));
+
     Ok(streams)
 }
 
@@ -208,29 +217,56 @@ async fn playback_access_token(
             .map_err(|e| e.to_string())?
     };
 
+    match &oauth {
+        Some(t) => log_to_file(&format!("[GQL] get_auth_token: some (len={})", t.len())),
+        None => log_to_file("[GQL] get_auth_token: none (request anonima)"),
+    }
+
     let body = serde_json::json!({
-        "query": "query PlaybackAccessToken_Template($login: String!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) { value signature __typename } }",
+        "query": "query PlaybackAccessToken_Template($login: String!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"site\", playerType: $playerType}) { value signature __typename } }",
         "variables": {
             "login": channel,
             "playerType": "embed"
         }
     });
 
-    let mut req = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let mut req = client
         .post(TWITCH_GQL_ENDPOINT)
         .header("Client-ID", TWITCH_PUBLIC_CLIENT_ID)
         .header("Content-Type", "application/json")
         .header("User-Agent", BROWSER_UA)
+        .header("Referer", "https://player.twitch.tv")
+        .header("Origin", "https://player.twitch.tv")
         .json(&body);
 
+    let mut used_auth = false;
     if let Some(tok) = oauth {
         req = req.header("Authorization", format!("OAuth {}", tok));
+        used_auth = true;
     }
 
-    let resp = req
+    let mut resp = req
         .send()
         .await
         .map_err(|e| format!("Error contactando la API de Twitch: {}", e))?;
+
+    if used_auth && resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        log_to_file("[GQL] Unauthorized con cookie, reintentando anonimo...");
+        resp = client
+            .post(TWITCH_GQL_ENDPOINT)
+            .header("Client-ID", TWITCH_PUBLIC_CLIENT_ID)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", BROWSER_UA)
+            .header("Referer", "https://player.twitch.tv")
+            .header("Origin", "https://player.twitch.tv")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Error contactando la API de Twitch: {}", e))?;
+    }
+
+    log_to_file(&format!("[GQL] status={}", resp.status()));
 
     let json: serde_json::Value = resp
         .json()
@@ -238,6 +274,7 @@ async fn playback_access_token(
         .map_err(|e| format!("Error parseando la respuesta de Twitch: {}", e))?;
 
     if let Some(err) = json["error"].as_str() {
+        log_to_file(&format!("[GQL] error: {}", err));
         return Err(format!("Twitch: {}", err));
     }
 
@@ -266,20 +303,41 @@ fn parse_master_playlist(text: &str, master_url: &str) -> Vec<StreamInfo> {
         }
 
         if let Some(rest) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            let attrs = split_attributes(rest);
             let mut name = None;
-            for attr in split_attributes(rest) {
+            for attr in &attrs {
                 if let Some(v) = attr.strip_prefix("VIDEO=") {
                     name = Some(v.trim_matches('"').to_string());
+                    break;
                 }
             }
             if name.is_none() {
-                for attr in split_attributes(rest) {
+                for attr in &attrs {
+                    if let Some(v) = attr.strip_prefix("STABLE-VARIANT-ID=") {
+                        name = Some(v.trim_matches('"').to_string());
+                        break;
+                    }
+                }
+            }
+            if name.is_none() {
+                for attr in &attrs {
+                    if let Some(v) = attr.strip_prefix("IVS-NAME=") {
+                        name = Some(v.trim_matches('"').to_string());
+                        break;
+                    }
+                }
+            }
+            if name.is_none() {
+                for attr in &attrs {
                     if let Some(v) = attr.strip_prefix("AUDIO=") {
                         if v.trim_matches('"') == "audio_only" {
                             name = Some("audio_only".to_string());
                         }
                     }
                 }
+            }
+            if name.as_deref() == Some("chunked") {
+                name = source_label(&attrs).or(name);
             }
             pending = name;
         } else if !line.starts_with('#') {
@@ -328,6 +386,25 @@ fn split_attributes(rest: &str) -> Vec<String> {
     }
     out.push(cur);
     out
+}
+
+fn source_label(attrs: &[String]) -> Option<String> {
+    let mut height: Option<u32> = None;
+    let mut framerate: Option<f64> = None;
+    for attr in attrs {
+        if let Some(v) = attr.strip_prefix("RESOLUTION=") {
+            if let Some(h) = v.split('x').nth(1) {
+                if let Ok(h) = h.parse::<u32>() {
+                    height = Some(h);
+                }
+            }
+        } else if let Some(v) = attr.strip_prefix("FRAME-RATE=") {
+            framerate = v.parse::<f64>().ok();
+        }
+    }
+    let height = height?;
+    let is_60 = framerate.map_or(false, |f| f >= 50.0);
+    Some(format!("{}{}", height, if is_60 { "p60" } else { "p" }))
 }
 
 fn resolve_playlist_url(master_url: &str, child: &str) -> String {
@@ -560,33 +637,36 @@ fn log_frontend_msg(msg: String) {
 
 #[tauri::command]
 async fn has_twitch_session(app: tauri::AppHandle, window_label: Option<String>) -> Result<bool, String> {
-    if load_oauth_token().is_some() {
-        log_to_file("[GQL] has_twitch_session: true (file token)");
-        return Ok(true);
-    }
+    let has_file = load_oauth_token().is_some();
 
     let label = window_label.unwrap_or_else(|| "main".to_string());
     let handle = app.clone();
     let label_clone = label.clone();
-    let cookies: Vec<_> = tokio::task::spawn_blocking(move || {
+    let has_cookie = tokio::task::spawn_blocking(move || {
         let webview = handle
             .get_webview_window(&label_clone)
             .ok_or(format!("Ventana '{}' no encontrada", label_clone))?;
-        webview.cookies().map_err(|e| e.to_string())
+        webview
+            .cookies()
+            .map(|cookies| {
+                cookies.iter().any(|c| {
+                    c.name() == "auth-token"
+                        && c.domain()
+                            .map(|d: &str| d.contains("twitch.tv"))
+                            .unwrap_or(false)
+                })
+            })
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
 
-    let has_session = cookies.iter().any(|c| {
-        c.name() == "auth-token"
-            && c.domain()
-                .map(|d: &str| d.contains("twitch.tv"))
-                .unwrap_or(false)
-    });
-
-    log_to_file(&format!("[GQL] has_twitch_session: {} (window='{}')", has_session, label));
-    Ok(has_session)
+    log_to_file(&format!(
+        "[GQL] has_twitch_session: file={} cookie={} (window='{}')",
+        has_file, has_cookie, label
+    ));
+    Ok(has_file || has_cookie)
 }
 
 const TWITCH_CLIENT_ID: &str = "hw3wyjrf3nmg3ljsdxkmyawahb25ir";

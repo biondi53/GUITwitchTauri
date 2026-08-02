@@ -24,18 +24,19 @@ async function resolveUrl(channel) {
       "Content-Type": "application/json",
       "User-Agent": UA,
     },
-    body: JSON.stringify({
+      body: JSON.stringify({
       query:
-        "query PlaybackAccessToken_Template($login: String!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) { value signature __typename } }",
+        "query PlaybackAccessToken_Template($login: String!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"site\", playerType: $playerType}) { value signature __typename } }",
       variables: { login: channel, playerType: "embed" },
     }),
   });
   const j = await gql.json();
   const t = j?.data?.streamPlaybackAccessToken;
   if (!t) return null;
+  const p = Date.now() % 999999;
   const master = await fetch(
-    `https://usher.ttvnw.net/api/channel/hls/${channel}.m3u8?allow_source=true&allow_audio_only=true&allow_spectre=true&fast_bread=true&playlist_include_framerate=true&reassignments_supported=true&supported_codecs=avc1,hvc1,av01&p=${CLIENT_ID}&player=twitchweb&sig=${t.signature}&token=${encodeURIComponent(t.value)}`,
-    { headers: { "User-Agent": UA } }
+    `https://usher.ttvnw.net/api/v2/channel/hls/${channel}.m3u8?platform=web&p=${p}&allow_source=true&allow_audio_only=true&playlist_include_framerate=true&supported_codecs=h264,h265,av1&fast_bread=true&sig=${t.signature}&token=${encodeURIComponent(t.value)}`,
+    { headers: { "User-Agent": UA, Referer: "https://player.twitch.tv", Origin: "https://player.twitch.tv" } }
   );
   if (!master.ok) return null;
   const entries = parseMaster(await master.text(), master.url);
@@ -54,14 +55,25 @@ function parseMaster(text, base) {
     const line = raw.trim();
     if (!line) continue;
     if (line.startsWith("#EXT-X-STREAM-INF:")) {
-      const m = line.match(/VIDEO="([^"]+)"/) || line.match(/AUDIO="audio_only"/);
-      pending = m ? (m[1] || "audio_only") : null;
+      pending = line.match(/VIDEO="([^"]+)"/)?.[1]
+        ?? line.match(/STABLE-VARIANT-ID="([^"]+)"/)?.[1]
+        ?? line.match(/IVS-NAME="([^"]+)"/)?.[1]
+        ?? (line.includes('AUDIO="audio_only"') ? "audio_only" : null);
+      if (pending === "chunked") pending = sourceLabel(line) || pending;
     } else if (!line.startsWith("#")) {
       if (pending) out.push({ name: normName(pending), url: new URL(line, base).href });
       pending = null;
     }
   }
   return out;
+}
+
+function sourceLabel(line) {
+  const res = line.match(/RESOLUTION=(\d+)x(\d+)/);
+  if (!res) return null;
+  const fr = line.match(/FRAME-RATE=([\d.]+)/);
+  const is60 = fr && parseFloat(fr[1]) >= 50;
+  return `${res[2]}${is60 ? "p60" : "p"}`;
 }
 
 function normName(v) {
