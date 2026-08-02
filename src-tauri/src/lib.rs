@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder};
@@ -146,86 +145,215 @@ struct StreamInfo {
     url: String,
 }
 
+const TWITCH_PUBLIC_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+const TWITCH_GQL_ENDPOINT: &str = "https://gql.twitch.tv/gql";
+const BROWSER_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
 #[tauri::command]
 async fn list_streams(app: tauri::AppHandle, channel: &str) -> Result<Vec<StreamInfo>, String> {
-    let token = {
+    let (sig, token) = playback_access_token(&app, channel).await?;
+
+    let master_url = reqwest::Url::parse_with_params(
+        &format!("https://usher.ttvnw.net/api/channel/hls/{}.m3u8", channel),
+        &[
+            ("allow_source", "true"),
+            ("allow_audio_only", "true"),
+            ("allow_spectre", "true"),
+            ("fast_bread", "true"),
+            ("playlist_include_framerate", "true"),
+            ("reassignments_supported", "true"),
+            ("supported_codecs", "avc1,hvc1,av01"),
+            ("p", TWITCH_PUBLIC_CLIENT_ID),
+            ("player", "twitchweb"),
+            ("sig", &sig),
+            ("token", &token),
+        ],
+    )
+    .map_err(|e| format!("Error construyendo la URL del CDN: {}", e))?;
+
+    let resp = reqwest::Client::new()
+        .get(master_url.clone())
+        .header("User-Agent", BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| format!("Error consultando el CDN de Twitch: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err("El canal esta offline o no existe.".into());
+    }
+
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+
+    let master_url_str = master_url.as_str().to_string();
+    let mut streams = parse_master_playlist(&text, &master_url_str);
+
+    streams.sort_by(|a, b| {
+        let ka = quality_sort_key(&a.name);
+        let kb = quality_sort_key(&b.name);
+        kb.cmp(&ka)
+    });
+
+    Ok(streams)
+}
+
+async fn playback_access_token(
+    app: &tauri::AppHandle,
+    channel: &str,
+) -> Result<(String, String), String> {
+    let oauth = {
         let app = app.clone();
         tokio::task::spawn_blocking(move || get_auth_token(&app))
             .await
             .map_err(|e| e.to_string())?
     };
 
-    let mut args: Vec<String> = vec![
-        format!("twitch.tv/{}", channel),
-        "--json".into(),
-        "--twitch-supported-codecs".into(),
-        "h264,h265,av1".into(),
-        "--twitch-low-latency".into(),
-    ];
-    if let Some(token) = token {
-        args.push(format!("--twitch-api-header=Authorization=OAuth {}", token));
-    }
-
-    let output = tokio::task::spawn_blocking(move || {
-        let exe = streamlink_exe();
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.args(&args);
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+    let body = serde_json::json!({
+        "query": "query PlaybackAccessToken_Template($login: String!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) { value signature __typename } }",
+        "variables": {
+            "login": channel,
+            "playerType": "embed"
         }
-        cmd.output()
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| {
-        format!(
-            "Error ejecutando streamlink: {}. Streamlink no se pudo encontrar en {}.",
-            e,
-            streamlink_exe().display()
-        )
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "El canal esta offline o no existe.".into()
-        } else {
-            stderr
-        });
-    }
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Error al parsear JSON de streamlink: {}", e))?;
-
-    let streams = json["streams"]
-        .as_object()
-        .ok_or("No se encontraron streams en la respuesta.")?;
-
-    let mut result: Vec<StreamInfo> = streams
-        .iter()
-        .filter(|(k, _)| k.as_str() != "worst" && k.as_str() != "best")
-        .filter(|(_, v)| {
-            v.get("url")
-                .and_then(|u| u.as_str())
-                .map(|u| !u.is_empty())
-                .unwrap_or(false)
-        })
-        .map(|(name, info)| StreamInfo {
-            name: name.clone(),
-            url: info["url"].as_str().unwrap_or("").to_string(),
-        })
-        .collect();
-
-    result.sort_by(|a, b| {
-        let ka = quality_sort_key(&a.name);
-        let kb = quality_sort_key(&b.name);
-        kb.cmp(&ka)
     });
 
-    Ok(result)
+    let mut req = reqwest::Client::new()
+        .post(TWITCH_GQL_ENDPOINT)
+        .header("Client-ID", TWITCH_PUBLIC_CLIENT_ID)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", BROWSER_UA)
+        .json(&body);
+
+    if let Some(tok) = oauth {
+        req = req.header("Authorization", format!("OAuth {}", tok));
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Error contactando la API de Twitch: {}", e))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Error parseando la respuesta de Twitch: {}", e))?;
+
+    if let Some(err) = json["error"].as_str() {
+        return Err(format!("Twitch: {}", err));
+    }
+
+    let data = &json["data"]["streamPlaybackAccessToken"];
+    let token = data["value"]
+        .as_str()
+        .ok_or("El canal esta offline o no existe.")?
+        .to_string();
+    let sig = data["signature"]
+        .as_str()
+        .ok_or("No se pudo obtener la firma de acceso.")?
+        .to_string();
+
+    Ok((sig, token))
+}
+
+fn parse_master_playlist(text: &str, master_url: &str) -> Vec<StreamInfo> {
+    let mut result = Vec::new();
+    let mut pending: Option<String> = None;
+    let mut seen: HashMap<String, u32> = HashMap::new();
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            let mut name = None;
+            for attr in split_attributes(rest) {
+                if let Some(v) = attr.strip_prefix("VIDEO=") {
+                    name = Some(v.trim_matches('"').to_string());
+                }
+            }
+            if name.is_none() {
+                for attr in split_attributes(rest) {
+                    if let Some(v) = attr.strip_prefix("AUDIO=") {
+                        if v.trim_matches('"') == "audio_only" {
+                            name = Some("audio_only".to_string());
+                        }
+                    }
+                }
+            }
+            pending = name;
+        } else if !line.starts_with('#') {
+            if let Some(base) = pending.take() {
+                let url = resolve_playlist_url(master_url, line);
+                if !url.is_empty() {
+                    result.push(StreamInfo {
+                        name: unique_stream_name(normalize_stream_name(&base).to_string(), &mut seen),
+                        url,
+                    });
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn normalize_stream_name(name: &str) -> &str {
+    if name == "chunked" {
+        return "source";
+    }
+    if let Some(stripped) = name.strip_suffix("30") {
+        if stripped.ends_with('p') {
+            return stripped;
+        }
+    }
+    name
+}
+
+fn split_attributes(rest: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for c in rest.chars() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                cur.push(c);
+            }
+            ',' if !in_quotes => {
+                out.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out
+}
+
+fn resolve_playlist_url(master_url: &str, child: &str) -> String {
+    if child.starts_with("http://") || child.starts_with("https://") {
+        return child.to_string();
+    }
+    let base = master_url.rsplit_once('/').map(|(b, _)| b).unwrap_or("");
+    format!("{}/{}", base, child)
+}
+
+fn unique_stream_name(base: String, seen: &mut HashMap<String, u32>) -> String {
+    let n = seen.entry(base.clone()).or_insert(0);
+    *n += 1;
+    if *n == 1 {
+        base
+    } else {
+        format!(
+            "{}_{}",
+            base,
+            if *n == 2 {
+                "alt".to_string()
+            } else {
+                format!("alt{}", *n - 1)
+            }
+        )
+    }
 }
 
 fn quality_sort_key(name: &str) -> (u32, u8, bool) {
@@ -235,228 +363,6 @@ fn quality_sort_key(name: &str) -> (u32, u8, bool) {
     let num = base.trim_end_matches("p60").trim_end_matches("p");
     let res = num.parse::<u32>().unwrap_or(0);
     (u32::MAX - res, if is_60 { 1 } else { 0 }, !is_alt)
-}
-
-fn streamlink_dir() -> PathBuf {
-    let local = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_default();
-    PathBuf::from(local).join("twitch-ultralight").join("streamlink")
-}
-
-fn streamlink_exe() -> PathBuf {
-    streamlink_dir().join("bin").join("streamlink.exe")
-}
-
-fn ensure_streamlink() -> Result<(), String> {
-    let dir = streamlink_dir();
-    let exe = streamlink_exe();
-
-    if exe.exists() {
-        return Ok(());
-    }
-
-    let resources_dir = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("No se pudo determinar el directorio de la app")?
-        .join("resources");
-
-    let zip_path = resources_dir.join("streamlink-portable.zip");
-
-    if !zip_path.exists() {
-        return Err("No se encontro el paquete de Streamlink.".into());
-    }
-
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-
-    let temp_dir = dir.join("_temp_extract");
-    if temp_dir.exists() {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
-
-    archive.extract(&temp_dir).map_err(|e| format!("Error extrayendo Streamlink: {}", e))?;
-
-    let mut found_subdir: Option<PathBuf> = None;
-    if let Ok(entries) = std::fs::read_dir(&temp_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if entry.path().join("bin").join("streamlink.exe").exists() {
-                    found_subdir = Some(entry.path());
-                    break;
-                }
-            }
-        }
-    }
-
-    let subdir = found_subdir.ok_or("No se encontro la estructura de Streamlink en el zip")?;
-
-    for entry in std::fs::read_dir(&subdir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let dest = dir.join(entry.file_name());
-        if entry.path().is_dir() {
-            let _ = std::fs::remove_dir_all(&dest);
-            std::fs::rename(entry.path(), &dest).map_err(|e| e.to_string())?;
-        } else {
-            let _ = std::fs::remove_file(&dest);
-            std::fs::copy(entry.path(), &dest).map_err(|e| e.to_string())?;
-        }
-    }
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    Ok(())
-}
-
-async fn check_streamlink_update() {
-    let dir = streamlink_dir();
-    let version_file = dir.join("version.txt");
-
-    let current_version = match std::fs::read_to_string(&version_file) {
-        Ok(v) => v.trim().to_string(),
-        Err(_) => return,
-    };
-
-    if current_version.is_empty() {
-        return;
-    }
-
-    let resp = match reqwest::Client::new()
-        .get("https://api.github.com/repos/streamlink/windows-builds/releases/latest")
-        .header("User-Agent", "twitch-ultralight")
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    let json: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
-    let tag = match json["tag_name"].as_str() {
-        Some(t) => t,
-        None => return,
-    };
-
-    let latest_version = tag.split('-').next().unwrap_or(tag).to_string();
-
-    if latest_version == current_version {
-        return;
-    }
-
-    let zip_url = json["assets"]
-        .as_array()
-        .and_then(|assets| {
-            assets.iter().find(|a| {
-                a["name"]
-                    .as_str()
-                    .map(|n| n.ends_with("-py314-x86_64.zip"))
-                    .unwrap_or(false)
-            })
-        })
-        .and_then(|a| a["browser_download_url"].as_str());
-
-    let zip_url = match zip_url {
-        Some(u) => u,
-        None => return,
-    };
-
-    let temp_zip = dir.join("_update.zip");
-
-    let resp = match reqwest::Client::new()
-        .get(zip_url)
-        .header("User-Agent", "twitch-ultralight")
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-
-    if bytes.is_empty() {
-        let _ = std::fs::remove_file(&temp_zip);
-        return;
-    }
-
-    if let Err(_) = std::fs::write(&temp_zip, &bytes) {
-        let _ = std::fs::remove_file(&temp_zip);
-        return;
-    }
-
-    let file = match std::fs::File::open(&temp_zip) {
-        Ok(f) => f,
-        Err(_) => {
-            let _ = std::fs::remove_file(&temp_zip);
-            return;
-        }
-    };
-
-    let mut archive = match zip::ZipArchive::new(file) {
-        Ok(a) => a,
-        Err(_) => {
-            let _ = std::fs::remove_file(&temp_zip);
-            return;
-        }
-    };
-
-    let temp_extract = dir.join("_temp_update_extract");
-    let _ = std::fs::remove_dir_all(&temp_extract);
-
-    if archive.extract(&temp_extract).is_err() {
-        let _ = std::fs::remove_dir_all(&temp_extract);
-        let _ = std::fs::remove_file(&temp_zip);
-        return;
-    }
-
-    let mut found_subdir: Option<std::path::PathBuf> = None;
-    if let Ok(entries) = std::fs::read_dir(&temp_extract) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if entry.path().join("bin").join("streamlink.exe").exists() {
-                    found_subdir = Some(entry.path());
-                    break;
-                }
-            }
-        }
-    }
-
-    let subdir = match found_subdir {
-        Some(s) => s,
-        None => {
-            let _ = std::fs::remove_dir_all(&temp_extract);
-            let _ = std::fs::remove_file(&temp_zip);
-            return;
-        }
-    };
-
-    for entry in std::fs::read_dir(&subdir).into_iter().flatten().flatten() {
-        let dest = dir.join(entry.file_name());
-        if entry.path().is_dir() {
-            let _ = std::fs::remove_dir_all(&dest);
-            let _ = std::fs::rename(entry.path(), &dest);
-        } else {
-            let _ = std::fs::remove_file(&dest);
-            let _ = std::fs::copy(entry.path(), &dest);
-        }
-    }
-
-    let _ = std::fs::write(&version_file, &latest_version);
-    let _ = std::fs::remove_dir_all(&temp_extract);
-    let _ = std::fs::remove_file(&temp_zip);
 }
 
 fn get_auth_token(app: &tauri::AppHandle) -> Option<String> {
@@ -2176,18 +2082,6 @@ pub fn run() {
         ])
         .setup(|app| {
             log_to_file("[APP] Tauri setup started");
-            if let Err(e) = ensure_streamlink() {
-                eprintln!("Advertencia Streamlink: {}", e);
-            }
-
-            let vf = streamlink_dir().join("version.txt");
-            if !vf.exists() {
-                let _ = std::fs::write(&vf, "8.4.0");
-            }
-
-            tauri::async_runtime::spawn(async move {
-                check_streamlink_update().await;
-            });
 
             let url = if tauri::is_dev() {
                 WebviewUrl::App("index.html".into())

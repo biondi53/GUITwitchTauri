@@ -5,7 +5,6 @@ dist/
 
 # Binarios / recursos locales de build
 Instaladores Estables/
-src-tauri/resources/streamlink-portable.zip
 
 # Notas y configuracion interna del desarrollador
 AGENTS.md

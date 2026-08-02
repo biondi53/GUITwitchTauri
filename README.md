@@ -58,4 +58,3 @@ Este comando ejecuta en orden: verificación del working tree limpio → bump de
 npm run tauri build -- --bundles nsis
 ```
 
-> Nota: el recurso `streamlink-portable.zip` es un binario de terceros que debe proveerse en `src-tauri/resources/` para empaquetar la funcionalidad de streamlink. No se distribuye en este repositorio.

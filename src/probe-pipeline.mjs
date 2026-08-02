@@ -1,27 +1,68 @@
-import { execFileSync } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
+const CHANNEL = "argentumunitedtv";
+const CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-const exe = join(homedir(), "AppData", "Local", "twitch-ultralight", "streamlink", "bin", "streamlink.exe");
-const args = [
-  "twitch.tv/argentumunitedtv",
-  "--json",
-  "--twitch-supported-codecs",
-  "h264,h265,av1",
-  "--twitch-low-latency",
-];
-
-let json;
-try {
-  json = JSON.parse(execFileSync(exe, args, { encoding: "utf8" }));
-} catch (e) {
-  console.error("streamlink fallo:", e.stderr || e.message);
-  process.exit(1);
+async function resolveUrl(channel) {
+  const gql = await fetch("https://gql.twitch.tv/gql", {
+    method: "POST",
+    headers: {
+      "Client-ID": CLIENT_ID,
+      "Content-Type": "application/json",
+      "User-Agent": UA,
+    },
+    body: JSON.stringify({
+      query:
+        "query PlaybackAccessToken_Template($login: String!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \"web\", playerBackend: \"mediaplayer\", playerType: $playerType}) { value signature __typename } }",
+      variables: { login: channel, playerType: "embed" },
+    }),
+  });
+  const j = await gql.json();
+  const t = j?.data?.streamPlaybackAccessToken;
+  if (!t) {
+    throw new Error("sin token de acceso (canal offline o inexistente): " + (j.error || JSON.stringify(j)));
+  }
+  const master = await fetch(
+    `https://usher.ttvnw.net/api/channel/hls/${channel}.m3u8?allow_source=true&allow_audio_only=true&allow_spectre=true&fast_bread=true&playlist_include_framerate=true&reassignments_supported=true&supported_codecs=avc1,hvc1,av01&p=${CLIENT_ID}&player=twitchweb&sig=${t.signature}&token=${encodeURIComponent(t.value)}`,
+    { headers: { "User-Agent": UA } }
+  );
+  if (!master.ok) throw new Error("usher HTTP " + master.status);
+  const entries = parseMaster(await master.text(), master.url);
+  return (
+    entries.find((e) => e.name === "720p")?.url ??
+    entries.find((e) => e.name === "720p60")?.url ??
+    entries[entries.length - 1]?.url ??
+    null
+  );
 }
 
-const url = json.streams?.["720p"]?.url ?? json.streams?.best?.url;
-if (!url) {
-  console.error("no se obtuvo URL de stream; streams:", Object.keys(json.streams ?? {}));
+function parseMaster(text, base) {
+  const out = [];
+  let pending = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith("#EXT-X-STREAM-INF:")) {
+      const m = line.match(/VIDEO="([^"]+)"/) || line.match(/AUDIO="audio_only"/);
+      pending = m ? (m[1] || "audio_only") : null;
+    } else if (!line.startsWith("#")) {
+      if (pending) out.push({ name: normName(pending), url: new URL(line, base).href });
+      pending = null;
+    }
+  }
+  return out;
+}
+
+function normName(v) {
+  if (v === "chunked") return "source";
+  return v.endsWith("p30") ? v.slice(0, -2) : v;
+}
+
+let url;
+try {
+  url = await resolveUrl(CHANNEL);
+  if (!url) throw new Error("no se obtuvo URL de stream");
+} catch (e) {
+  console.error("resolucion de URL fallo:", e.message);
   process.exit(1);
 }
 console.error(`URL 720p: ${url.slice(0, 60)}...`);
