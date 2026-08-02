@@ -13,6 +13,7 @@
     "windows": []
   },
   "bundle": {
+    "publisher": "biondi53",
     "targets": [
       "nsis"
     ]

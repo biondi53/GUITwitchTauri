@@ -2,6 +2,14 @@
 
 Cliente de escritorio ultraligero para ver streams de Twitch y usar el chat, construido con Tauri 2 + Vanilla JS.
 
+## Instalación
+
+La forma recomendada de instalar la aplicación es con winget:
+
+```powershell
+winget install --id TwitchUltraligero.TwitchUltralight
+```
+
 ## Características
 
 - Reproducción de streams con HLS (control de rebobinado y "volver al VIVO").
